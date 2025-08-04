@@ -705,15 +705,18 @@ if __name__ == "__main__":
 
     if args.use_rainbow:
         run_name += "-Rainbow"
+        args.use_ddqn = True
+        args.use_per = True
+        args.n_steps = 5
     else:
         run_name += "-VanillaDQN"
+        if args.use_ddqn:
+            run_name += "+DDQN"
+        if args.use_per:
+            run_name += "+PER"
+        if args.n_steps > 1:
+            run_name += f"+{args.n_steps}steps"
 
-    if args.use_ddqn:
-        run_name += "+DDQN"
-    if args.use_per:
-        run_name += "+PER"
-    if args.n_steps > 1:
-        run_name += f"+{args.n_steps}steps"
 
     run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}"
 
