@@ -58,20 +58,24 @@ class SumTree:
 
         parent_idx = 0
 
-        while 2*parent_idx + 1 < len(self.tree):
-            left = 2 * parent_idx + 1
-            right = left + 1
-            
-            
-            if v <=self.tree[left]:
-                parent_idx = left
+        while True:
+            left_child_idx = 2 * parent_idx + 1
+            right_child_idx = left_child_idx + 1
+
+
+            if left_child_idx >= len(self.tree):
+                leaf_tree_idx = parent_idx
+                break
             else:
-                parent_idx = right
-                v = v - self.tree[left]
-                
-        leaf_idx = parent_idx - (self.capacity - 1)
+                if v <= self.tree[left_child_idx]:
+                    parent_idx = left_child_idx
+                else:
+                    v -= self.tree[left_child_idx]
+                    parent_idx = right_child_idx
+                    
+        data_idx = leaf_tree_idx - self.capacity + 1
         
-        return  leaf_idx, self.tree[parent_idx], self.data[leaf_idx]
+        return leaf_tree_idx, self.tree[leaf_tree_idx], self.data[data_idx]
 
     def total_priority(self):
         return self.tree[0]

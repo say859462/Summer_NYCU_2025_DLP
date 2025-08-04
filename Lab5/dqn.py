@@ -17,6 +17,7 @@ import wandb
 import argparse
 import time
 import sumtree
+from rainbowDQN import DuelingDQN, RainbowDQN, compute_distributional_loss
 
 gym.register_envs(ale_py)
 
@@ -135,6 +136,7 @@ class PrioritizedReplayBuffer:
     def add(self, transition, error):
         max_p = np.max(self.tree.tree[-self.tree.capacity :])
 
+        # If there's no element in the tree, set max_p to 1.0
         if max_p == 0:
             max_p = 1.0
 
@@ -175,7 +177,7 @@ class PrioritizedReplayBuffer:
         return b_idx, b_memory, is_weights
 
     def update_priorities(self, tree_indices, abs_errors):
-        errors = abs_errors + self.eps
+        errors = np.nan_to_num(abs_errors) + self.eps
         priorities = np.power(errors, self.alpha)
 
         for ti, p in zip(tree_indices, priorities):
@@ -191,7 +193,7 @@ class DQNAgent:
         # There will be some differences on the environment settings for Atari games and CartPole
         self.num_actions = self.env.action_space.n
         self.env_name = env_name
-        
+
         self.preprocessor = None
         if self.env_name == "ALE/Pong-v5":
             self.preprocessor = AtariPreprocessor()
@@ -200,18 +202,58 @@ class DQNAgent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device:", self.device)
 
-        # DQN network
-        self.q_net = DQN(self.num_actions, env_name).to(self.device)
-        self.q_net.apply(init_weights)
-        # Target network for DQN
-        self.target_net = DQN(self.num_actions, env_name).to(self.device)
-        self.target_net.load_state_dict(self.q_net.state_dict())
-        self.target_net.eval()  # Set the target network to evaluation mode
+        # # DQN network
+        # self.q_net = DQN(self.num_actions, env_name).to(self.device)
+        # self.q_net.apply(init_weights)
+        # # Target network for DQN
+        # self.target_net = DQN(self.num_actions, env_name).to(self.device)
+        # self.target_net.load_state_dict(self.q_net.state_dict())
+        # self.target_net.eval()  # Set the target network to evaluation mode
 
-        # Parameter for Double DQN,PER,multi-step return
+        # Dueling Network Ver.
+        # self.q_net = DuelingDQN(self.num_actions, env_name).to(self.device)
+        # self.q_net.apply(init_weights)
+        # # Target network for DQN
+        # self.target_net = DuelingDQN(self.num_actions, env_name).to(self.device)
+        # self.target_net.load_state_dict(self.q_net.state_dict())
+        # self.target_net.eval()  # Set the target network to evaluation mode
+
+        # Parameter for Double DQN,PER,multi-step return and Rainbow DQN
         self.use_ddqn = args.use_ddqn
         self.use_per = args.use_per
         self.n_steps = args.n_steps
+        self.use_rainbow = args.use_rainbow
+
+        # Distributional and Noisy are controlled by Rainbow DQN
+        self.use_dist = self.use_rainbow
+        self.use_noisy = self.use_rainbow
+
+        if self.use_dist:
+            self.n_atoms = args.n_atoms
+            self.v_min = args.v_min
+            self.v_max = args.v_max
+            self.support = torch.linspace(self.v_min, self.v_max, self.n_atoms).to(
+                self.device
+            )
+            self.delta_z = (self.v_max - self.v_min) / (self.n_atoms - 1)
+
+        if self.use_rainbow:
+            print("Using Rainbow Model (Dueling + Distributional + Noisy)")
+            self.q_net = RainbowDQN(
+                self.num_actions, self.n_atoms, self.v_min, self.v_max, env_name
+            ).to(self.device)
+            self.target_net = RainbowDQN(
+                self.num_actions, self.n_atoms, self.v_min, self.v_max, env_name
+            ).to(self.device)
+        else:
+            # DQN
+            print("Using Standard DQN Model")
+            self.q_net = DQN(self.num_actions, env_name).to(self.device)
+            self.target_net = DQN(self.num_actions, env_name).to(self.device)
+
+        self.q_net.apply(init_weights)
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        self.target_net.eval()
 
         if self.use_per:
             # Initialize the prioritized replay buffer
@@ -256,6 +298,17 @@ class DQNAgent:
 
     # Epsilon-greedy action selection
     def select_action(self, state):
+        # If the Rainbow DQN is used, we will use the get_q_values method to get the Q-values
+        if self.use_noisy:
+            state_tensor = (
+                torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
+            )
+            with torch.no_grad():
+                q_values = self.q_net.get_q_values(state_tensor)
+
+            return q_values.argmax().item()
+
+        # Epsilon-greedy action selection
         # random
         if random.random() < self.epsilon:
             # Select a random action from the action space [0, num_actions)
@@ -274,7 +327,7 @@ class DQNAgent:
 
     def _get_n_step_info(self):
         # Get the n-step return information from the n-step buffer
-        reward = torch.zeros(1, device=self.device)
+        reward = 0.0
         for i in range(len(self.n_step_buffer)):
             reward += (self.gamma**i) * self.n_step_buffer[i][2]
 
@@ -293,9 +346,7 @@ class DQNAgent:
             obs, _ = self.env.reset()
             # Since there might be differnet games like CartPole and Atari games
             # We dont need to preprocess the observation for CartPole
-            state = (
-                self.preprocessor.reset(obs) if self.preprocessor else obs
-            )
+            state = self.preprocessor.reset(obs) if self.preprocessor else obs
 
             if self.n_steps > 1:
                 self.n_step_buffer.clear()
@@ -329,9 +380,7 @@ class DQNAgent:
                 # Take the next observation and preprocess it into the acceptable input of DQN
 
                 next_state = (
-                    self.preprocessor.step(next_obs)
-                    if self.preprocessor
-                    else next_obs
+                    self.preprocessor.step(next_obs) if self.preprocessor else next_obs
                 )
 
                 # Store the transition in the replay memory
@@ -371,6 +420,18 @@ class DQNAgent:
                 self.env_count += 1
                 step_count += 1
 
+                if self.env_count % 100000 == 0:
+                    if self.env_name == "ALE/Pong-v5":
+                        model_path = os.path.join(
+                            self.save_dir, f"model_pong{self.env_count}.pt"
+                        )
+                    else:
+                        model_path = os.path.join(
+                            self.save_dir, f"model_CartPole{self.env_count}.pt"
+                        )
+                    torch.save(self.q_net.state_dict(), model_path)
+                    print(f"Saved model checkpoint to {model_path}")
+
                 if self.env_count % 1000 == 0:
                     print(
                         f"[Collect] Ep: {ep} Step: {step_count} Env_count: {self.env_count} Train_count: {self.train_count} Eps: {self.epsilon:.4f}"
@@ -401,23 +462,18 @@ class DQNAgent:
                 },
                 step=self.env_count,
             )
+
             ########## YOUR CODE HERE  ##########
             # Add additional wandb logs for debugging if needed
 
             ########## END OF YOUR CODE ##########
-            if ep % 100000 == 0:
-                model_path = os.path.join(self.save_dir, f"model_ep{ep}.pt")
-                torch.save(self.q_net.state_dict(), model_path)
-                print(f"Saved model checkpoint to {model_path}")
 
             if ep % 20 == 0:
                 eval_reward = self.evaluate()
                 self.eval_scores.append(eval_reward)
                 if eval_reward > self.best_reward:
                     self.best_reward = eval_reward
-                    model_path = os.path.join(
-                        self.save_dir, "best_model.pt"
-                    )
+                    model_path = os.path.join(self.save_dir, "best_model.pt")
                     torch.save(self.q_net.state_dict(), model_path)
                     print(
                         f"Saved new best model to {model_path} with reward {eval_reward}"
@@ -453,7 +509,7 @@ class DQNAgent:
     def evaluate(self):
         obs, _ = self.test_env.reset()
         state = self.preprocessor.reset(obs) if self.env_name == "ALE/Pong-v5" else obs
-        
+
         done = False
         total_reward = 0
 
@@ -462,12 +518,12 @@ class DQNAgent:
                 torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
             )
             with torch.no_grad():
-                    action = self.q_net(state_tensor).argmax().item()
-                    
+                action = self.q_net(state_tensor).argmax().item()
+
             next_obs, reward, terminated, truncated, _ = self.test_env.step(action)
             done = terminated or truncated
             total_reward += reward
-            
+
             state = (
                 self.preprocessor.step(next_obs)
                 if self.env_name == "ALE/Pong-v5"
@@ -494,6 +550,7 @@ class DQNAgent:
         else:
             mini_sample = random.sample(self.memory, self.batch_size)
             states, actions, rewards, next_states, dones = zip(*mini_sample)
+            is_weights = None
 
         # Convert the states, actions, rewards, next_states, and dones into torch tensors
         # NOTE: Enable this part after you finish the mini-batch sampling
@@ -506,45 +563,61 @@ class DQNAgent:
         rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).to(self.device)
 
-        # Retrieve the *predicted Q-values for the current states and actions
-        # self.q_net(states) returns the q values for all actions , size (batch_size, num_actions)
-        # actions.unsqueeze(1) reshapes actions to (batch_size, 1) so that it can be used for indexing
-        # gather(1, actions.unsqueeze(1)) selects the q values for the actions taken
-        # squeeze(1) removes the extra dimension, resulting in a tensor of shape (batch_size,)
-        q_values = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        if self.use_dist:
 
-        ########## YOUR CODE HERE (~10 lines) ##########
-        # Implement the loss function of DQN and the gradient updates
+            gamma = self.gamma**self.n_steps
+            loss, abs_errors = compute_distributional_loss(
+                q_net=self.q_net,
+                target_net=self.target_net,
+                states=states,
+                actions=actions,
+                rewards=rewards,
+                next_states=next_states,
+                dones=dones,
+                gamma=gamma,
+                support=self.support,
+                delta_z=self.delta_z,
+                v_min=self.v_min,
+                v_max=self.v_max,
+                n_atoms=self.n_atoms,
+                batch_size=self.batch_size,
+                is_weights=is_weights,
+            )
 
-        with torch.no_grad():
-
-            if self.use_ddqn:
-                # Select the actions for the next states using the main network
-                main_net_actions = self.q_net(next_states).argmax(1, keepdim=True)
-                # Use the target network to get the Q-values for the next states
-                next_q_values = (
-                    self.target_net(next_states).gather(1, main_net_actions).squeeze(1)
-                )
-            else:
-                # Compute the target Q-values using the target network
-                next_q_values = self.target_net(next_states).max(1)[0]
-
-        # if the games is done, the target Q-value is just the reward (there is no future reward)
-        # if the game is not done, the target Q-value is the reward + discounted future
-        # if n_steps > 1, we need to consider the n-step return (gamma^n)
-
-        gamma = self.gamma**self.n_steps
-        target_q_values = rewards + (1 - dones) * gamma * next_q_values
-
-        # Calculate dqn loss
-        if self.use_per:
-            td_errors = target_q_values - q_values
-            loss = (is_weights * (td_errors**2)).mean()
-            abs_errors = td_errors.abs().detach().cpu().numpy()
-            self.memory.update_priorities(tree_indices, abs_errors)
+            if self.use_per:
+                self.memory.update_priorities(tree_indices, abs_errors)
         else:
-            loss = nn.functional.mse_loss(q_values, target_q_values)
+            ########## YOUR CODE HERE (~10 lines) ##########
+            # Implement the loss function of DQN and the gradient updates
+            q_values = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            with torch.no_grad():
+                if self.use_ddqn:
+                    # Select the actions for the next states using the main network
+                    main_net_actions = self.q_net(next_states).argmax(1, keepdim=True)
+                    # Use the target network to get the Q-values for the next states
+                    next_q_values = (
+                        self.target_net(next_states)
+                        .gather(1, main_net_actions)
+                        .squeeze(1)
+                    )
+                else:
+                    # Compute the target Q-values using the target network
+                    next_q_values = self.target_net(next_states).max(1)[0]
+            gamma = self.gamma**self.n_steps
+            target_q_values = rewards + (1 - dones) * gamma * next_q_values
+            # if the games is done, the target Q-value is just the reward (there is no future reward)
+            # if the game is not done, the target Q-value is the reward + discounted future
+            # if n_steps > 1, we need to consider the n-step return (gamma^n)
+            # Calculate dqn loss
+            if self.use_per:
+                td_errors = target_q_values - q_values
+                loss = (is_weights * (td_errors**2)).mean()
+                abs_errors = td_errors.abs().detach().cpu().numpy()
+                self.memory.update_priorities(tree_indices, abs_errors)
+            else:
+                loss = nn.functional.mse_loss(q_values, target_q_values)
 
+        # Optimize Step
         self.optimizer.zero_grad()
         loss.backward()
         # Clip the gradients to prevent exploding gradients
@@ -555,6 +628,11 @@ class DQNAgent:
         # Update the model weight of target network
         if self.train_count % self.target_update_frequency == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
+
+        # --- Reset Noisy Layers' noise ---
+        if self.use_noisy:
+            self.q_net.reset_noise()
+            self.target_net.reset_noise()
 
         # NOTE: Enable this part if "loss" is defined
         if self.train_count % 1000 == 0:
@@ -596,21 +674,55 @@ if __name__ == "__main__":
     # PER Hyperparameters
     parser.add_argument("--per-alpha", type=float, default=0.6, help="Alpha for PER")
     parser.add_argument("--per-beta", type=float, default=0.4, help="Beta for PER")
+
+    # Rainbow DQN
+    parser.add_argument(
+        "--use-rainbow",
+        action="store_true",
+        help="Use Rainbow components (Dueling, Distributional, Noisy)",
+    )
+
+    # Distributinoal RL Parameters
+    parser.add_argument(
+        "--n-atoms", type=int, default=51, help="Number of atoms for Distributional RL"
+    )
+    parser.add_argument(
+        "--v-min",
+        type=float,
+        default=-10.0,
+        help="Minimum value of support for Distributional RL",
+    )
+    parser.add_argument(
+        "--v-max",
+        type=float,
+        default=10.0,
+        help="Maximum value of support for Distributional RL",
+    )
+
     args = parser.parse_args()
 
     run_name = f"{args.env_name}"
-    if args.use_ddqn:
-        run_name += "-DDQN"
-    if args.use_per:
-        run_name += f"-PER(a={args.per_alpha},b={args.per_beta})"
-    if args.n_steps > 1:
-        run_name += f"-{args.n_steps}steps"
-    if not (args.use_ddqn or args.use_per or args.n_steps > 1):
-        run_name += "-Vanilla"
-    run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}"
-    if args.env_name == "ALE/Pong-v5":
-            wandb.init(project=f"DLP-Lab5-DQN-PongV5", name=run_name, save_code=True)
+
+    if args.use_rainbow:
+        run_name += "-Rainbow"
     else:
-        wandb.init(project=f"DLP-Lab5-DQN-{args.env_name}", name=run_name, save_code=True)
+        run_name += "-VanillaDQN"
+
+    if args.use_ddqn:
+        run_name += "+DDQN"
+    if args.use_per:
+        run_name += "+PER"
+    if args.n_steps > 1:
+        run_name += f"+{args.n_steps}steps"
+
+    run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}"
+
+    if args.env_name == "ALE/Pong-v5":
+        wandb.init(project=f"DLP-Lab5-DQN-PongV5", name=run_name, save_code=True)
+    else:
+        wandb.init(
+            project=f"DLP-Lab5-DQN-{args.env_name}", name=run_name, save_code=True
+        )
+
     agent = DQNAgent(args=args, env_name=args.env_name)
     agent.run(episodes=args.episode)
