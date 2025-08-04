@@ -144,7 +144,7 @@ class PrioritizedReplayBuffer:
         return self.tree.n_entries
 
     def sample(self, batch_size):
-        
+
         # Store the sample drawed from the replay memory
         b_idx = np.empty((batch_size,), dtype=np.int32)
         b_memory = []
@@ -152,14 +152,12 @@ class PrioritizedReplayBuffer:
 
         priority_segment = self.tree.total_priority() / batch_size
 
-        
-
         for i in range(batch_size):
-            
+
             # Sampling interval [a,b]
             a = priority_segment * i
             b = priority_segment * (i + 1)
-            
+
             v = np.random.uniform(a, b)
             idx, p, data = self.tree.get_leaf(v)
 
@@ -193,10 +191,12 @@ class DQNAgent:
         # There will be some differences on the environment settings for Atari games and CartPole
         self.num_actions = self.env.action_space.n
         self.env_name = env_name
-
+        
+        self.preprocessor = None
         if self.env_name == "ALE/Pong-v5":
             self.preprocessor = AtariPreprocessor()
 
+        self.eval_scores = []
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device:", self.device)
 
@@ -245,7 +245,7 @@ class DQNAgent:
         self.replay_start_size = args.replay_start_size
         self.target_update_frequency = args.target_update_frequency
         self.train_per_step = args.train_per_step
-        self.save_dir = args.save_dir
+        self.save_dir = args.save_dir + f"\{env_name}"
 
         print(
             f"Running with settings: DDQN={self.use_ddqn}, PER={self.use_per}, N-steps={self.n_steps}"
@@ -274,7 +274,7 @@ class DQNAgent:
 
     def _get_n_step_info(self):
         # Get the n-step return information from the n-step buffer
-        reward = 0
+        reward = torch.zeros(1, device=self.device)
         for i in range(len(self.n_step_buffer)):
             reward += (self.gamma**i) * self.n_step_buffer[i][2]
 
@@ -294,7 +294,7 @@ class DQNAgent:
             # Since there might be differnet games like CartPole and Atari games
             # We dont need to preprocess the observation for CartPole
             state = (
-                self.preprocessor.reset(obs) if self.env_name == "ALE/Pong-v5" else obs
+                self.preprocessor.reset(obs) if self.preprocessor else obs
             )
 
             if self.n_steps > 1:
@@ -330,7 +330,7 @@ class DQNAgent:
 
                 next_state = (
                     self.preprocessor.step(next_obs)
-                    if self.env_name == "ALE/Pong-v5"
+                    if self.preprocessor
                     else next_obs
                 )
 
@@ -373,7 +373,7 @@ class DQNAgent:
 
                 if self.env_count % 1000 == 0:
                     print(
-                        f"[Collect] Ep: {ep} Step: {step_count} SC: {self.env_count} UC: {self.train_count} Eps: {self.epsilon:.4f}"
+                        f"[Collect] Ep: {ep} Step: {step_count} Env_count: {self.env_count} Train_count: {self.train_count} Eps: {self.epsilon:.4f}"
                     )
                     wandb.log(
                         {
@@ -389,7 +389,7 @@ class DQNAgent:
 
                     ########## END OF YOUR CODE ##########
             print(
-                f"[Eval] Ep: {ep} Total Reward: {total_reward} SC: {self.env_count} UC: {self.train_count} Eps: {self.epsilon:.4f}"
+                f"[Eval] Ep: {ep} Total Reward: {total_reward} Env_Count: {self.env_count} Train_Count: {self.train_count} Eps: {self.epsilon:.4f}"
             )
             wandb.log(
                 {
@@ -405,22 +405,25 @@ class DQNAgent:
             # Add additional wandb logs for debugging if needed
 
             ########## END OF YOUR CODE ##########
-            if ep % 100 == 0:
+            if ep % 100000 == 0:
                 model_path = os.path.join(self.save_dir, f"model_ep{ep}.pt")
                 torch.save(self.q_net.state_dict(), model_path)
                 print(f"Saved model checkpoint to {model_path}")
 
             if ep % 20 == 0:
                 eval_reward = self.evaluate()
+                self.eval_scores.append(eval_reward)
                 if eval_reward > self.best_reward:
                     self.best_reward = eval_reward
-                    model_path = os.path.join(self.save_dir, "best_model.pt")
+                    model_path = os.path.join(
+                        self.save_dir, "best_model.pt"
+                    )
                     torch.save(self.q_net.state_dict(), model_path)
                     print(
                         f"Saved new best model to {model_path} with reward {eval_reward}"
                     )
                 print(
-                    f"[TrueEval] Ep: {ep} Eval Reward: {eval_reward:.2f} SC: {self.env_count} UC: {self.train_count}"
+                    f"[TrueEval] Ep: {ep} Eval Reward: {eval_reward:.2f} Env_Count: {self.env_count} Train_Count: {self.train_count}"
                 )
                 wandb.log(
                     {
@@ -431,9 +434,26 @@ class DQNAgent:
                     step=self.env_count,
                 )
 
+        print("\n" + "=" * 40)
+        print("           Training Finished           ")
+        print("=" * 40)
+        if self.eval_scores:
+            avg_score = np.mean(self.eval_scores)
+            max_score = np.max(self.eval_scores)
+            print(f"Total Evaluations Performed: {len(self.eval_scores)}")
+            print(f"Average Evaluation Score: {avg_score:.2f}")
+            print(f"Maximum Evaluation Score: {max_score:.2f}")
+            wandb.log(
+                {"final_avg_eval_score": avg_score, "final_max_eval_score": max_score}
+            )
+        else:
+            print("No evaluations were performed (total episodes < 20).")
+        print("=" * 40)
+
     def evaluate(self):
         obs, _ = self.test_env.reset()
         state = self.preprocessor.reset(obs) if self.env_name == "ALE/Pong-v5" else obs
+        
         done = False
         total_reward = 0
 
@@ -442,10 +462,12 @@ class DQNAgent:
                 torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
             )
             with torch.no_grad():
-                action = self.q_net(state_tensor).argmax().item()
+                    action = self.q_net(state_tensor).argmax().item()
+                    
             next_obs, reward, terminated, truncated, _ = self.test_env.step(action)
             done = terminated or truncated
             total_reward += reward
+            
             state = (
                 self.preprocessor.step(next_obs)
                 if self.env_name == "ALE/Pong-v5"
@@ -462,6 +484,7 @@ class DQNAgent:
         # Decay function for epsilin-greedy exploration
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
+
         self.train_count += 1
 
         if self.use_per:
@@ -544,16 +567,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save-dir", type=str, default="./results")
     parser.add_argument("--wandb-run-name", type=str, default="cartpole-run")
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--memory-size", type=int, default=100000)
-    parser.add_argument("--lr", type=float, default=0.0001)
+    parser.add_argument("--lr", type=float, default=0.0025)
     parser.add_argument("--discount-factor", type=float, default=0.99)
     parser.add_argument("--epsilon-start", type=float, default=1.0)
-    parser.add_argument("--epsilon-decay", type=float, default=0.999999)
+    parser.add_argument("--epsilon-decay", type=float, default=0.99)
     parser.add_argument("--epsilon-min", type=float, default=0.05)
     parser.add_argument("--target-update-frequency", type=int, default=1000)
     # Start training after collecting enough samples
-    parser.add_argument("--replay-start-size", type=int, default=50000)
+    parser.add_argument("--replay_start_size", type=int, default=1000)
     parser.add_argument("--max-episode-steps", type=int, default=10000)
     parser.add_argument("--train-per-step", type=int, default=1)
     parser.add_argument(
@@ -562,7 +585,7 @@ if __name__ == "__main__":
         default="CartPole-v1",
         choices=["CartPole-v1", "ALE/Pong-v5"],
     )
-
+    parser.add_argument("--episode", type=int, default=1000)
     # Enhancements Flags
     parser.add_argument("--use-ddqn", action="store_true", help="Use Double DQN (DDQN)")
     parser.add_argument(
@@ -584,8 +607,10 @@ if __name__ == "__main__":
         run_name += f"-{args.n_steps}steps"
     if not (args.use_ddqn or args.use_per or args.n_steps > 1):
         run_name += "-Vanilla"
-    run_name += f"-lr{args.lr}-bs{args.batch_size}"
-
-    wandb.init(project=f"DLP-Lab5-DQN-{args.env_name}", name=run_name, save_code=True)
+    run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}"
+    if args.env_name == "ALE/Pong-v5":
+            wandb.init(project=f"DLP-Lab5-DQN-PongV5", name=run_name, save_code=True)
+    else:
+        wandb.init(project=f"DLP-Lab5-DQN-{args.env_name}", name=run_name, save_code=True)
     agent = DQNAgent(args=args, env_name=args.env_name)
-    agent.run()
+    agent.run(episodes=args.episode)

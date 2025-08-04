@@ -22,3 +22,9 @@ plots/
 *.rar
 *.pdf
 Lab4/Lab4.7z
+results/
+wandb/
+
+Lab4/modules/modules.py
+Lab4/Trainer.py
+Lab4/Tester.py
