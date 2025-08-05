@@ -12,6 +12,7 @@ from modules import (
     Decoder_Fusion,
     Label_Encoder,
     RGB_Encoder,
+    Learned_Prior_Predictor,
 )
 from torchvision.utils import save_image
 from torch import stack
@@ -85,16 +86,21 @@ class Test_model(VAE_Model):
         # Modules to transform image from RGB-domain to feature-domain
         self.frame_transformation = RGB_Encoder(3, args.F_dim)
         self.label_transformation = Label_Encoder(3, args.L_dim)
-
+        self.Learned_Prior = Learned_Prior_Predictor(
+            args.F_dim + args.L_dim, args.N_dim
+        )
         # Conduct Posterior prediction in Encoder
         self.Gaussian_Predictor = Gaussian_Predictor(
             args.F_dim + args.L_dim, args.N_dim
         )
+        decoder_fusion_in_dim = args.F_dim + args.L_dim + args.N_dim + args.F_dim
         self.Decoder_Fusion = Decoder_Fusion(
-            args.F_dim + args.L_dim + args.N_dim, args.D_out_dim
+            decoder_fusion_in_dim, args.D_out_dim
         )
 
+        # Generative model
         self.Generator = Generator(input_nc=args.D_out_dim, output_nc=3)
+
 
         self.mse_criterion = nn.MSELoss()
         self.current_epoch = 0
@@ -127,7 +133,12 @@ class Test_model(VAE_Model):
             header=True,
             index=False,
         )
+# In the Test_model class
 
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
     def val_one_step(self, img, label, idx=0):
         img = img.permute(1, 0, 2, 3, 4)  # change tensor into (seq, B, C, H, W)
         label = label.permute(1, 0, 2, 3, 4)  # change tensor into (seq, B, C, H, W)
@@ -139,20 +150,34 @@ class Test_model(VAE_Model):
         # Both list will be used to make gif
         decoded_frame_list = [img[0].cpu()]
         label_list = []
-
+        with torch.no_grad():
+            skip_feat = self.frame_transformation(img[0])
+        prev_frame_feat = skip_feat
         for i in range(1, 630):
-            frame_feat = self.frame_transformation(
-                decoded_frame_list[i - 1].to(self.args.device)
-            )
-            label_feat = self.label_transformation(label[i]).to(self.args.device)
-            z, _, _ = self.Gaussian_Predictor(frame_feat, label_feat)
-            # Generate noises
-            z = torch.randn_like(z)
+            label_feat = self.label_transformation(label[i])
 
-            out = self.Decoder_Fusion(frame_feat, label_feat, z)
+            # --- 2. 使用可學習先驗網路 (Learned_Prior_Predictor) 預測 z 的分佈 ---
+            # 輸入是前一幀的特徵和當前姿態的特徵
+            prior_mu, prior_logvar = self.Learned_Prior(prev_frame_feat, label_feat)
+
+            # --- 3. 從預測出的先驗分佈中採樣 z ---
+            z = self.reparameterize(prior_mu, prior_logvar)
+
+            # --- 4. 將 skip_feat 傳入 Decoder_Fusion ---
+            # 輸入: 前一幀特徵, 當前姿態特徵, 採樣的z, 和第一幀的skip特徵
+            out = self.Decoder_Fusion(prev_frame_feat, label_feat, z, skip_feat)
             out = self.Generator(out)
+
+            # 將生成的幀加入列表，並更新 prev_frame_feat 以供下一步使用
             decoded_frame_list.append(out.cpu())
-            label_list.append(label_feat.cpu())
+            label_list.append(label[i].cpu()) 
+
+            prev_frame_feat = self.frame_transformation(out)
+        
+        # 移除初始幀，只保留 629 個生成的幀 + 1個給定的真實幀 = 630 總長度
+        # Kaggle 要求 629 幀，因此我們從列表的第二個元素開始
+        generated_frames_for_submission = stack(decoded_frame_list[1:]).squeeze(1) # Shape: (629, 3, 32, 64)
+            
 
         # Please do not modify this part, it is used for visulization
         generated_frame = stack(decoded_frame_list).permute(1, 0, 2, 3, 4)
@@ -166,14 +191,13 @@ class Test_model(VAE_Model):
             64,
         ), f"The shape of output should be (1, 630, 3, 32, 64), but your output shape is {generated_frame.shape}"
 
-        self.make_gif(
-            generated_frame[0], os.path.join(self.args.save_root, f"pred_seq{idx}.gif")
-        )
+        generated_frames_for_gif = stack(decoded_frame_list).squeeze(1) # Shape: (630, 3, 32, 64)
+        self.make_gif(generated_frames_for_gif, os.path.join(self.args.save_root, f"pred_seq{idx}.gif"))
 
         # Reshape the generated frame to (630, 3 * 64 * 32)
-        generated_frame = generated_frame.reshape(630, -1)
+        generated_frames_for_submission = generated_frames_for_submission.reshape(generated_frames_for_submission.shape[0], -1)
 
-        return generated_frame
+        return generated_frames_for_submission
 
     def make_gif(self, images_list, img_name):
         new_list = []

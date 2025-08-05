@@ -10,12 +10,51 @@ __all__ = [
     "Gaussian_Predictor",
     "Decoder_Fusion",
     "Label_Encoder",
+    "Learned_Prior_Predictor"
 ]
 
 """
     Receive input from decoder fusion ,and generate ouput RGB image
 """
+# In modules.py
 
+# ... (keep existing classes like Generator, RGB_Encoder, etc.)
+
+"""
+    # Learned Prior Predictor (New Module based on the paper)
+    
+    Receives features from the previous frame and the current label 
+    to predict the parameters of the prior distribution for the latent variable z_t.
+"""
+class Learned_Prior_Predictor(nn.Sequential):
+    def __init__(self, in_chans=160, out_chans=96): # in_chans = F_dim + L_dim
+        super(Learned_Prior_Predictor, self).__init__(
+            ResidualBlock(in_chans, out_chans // 4),
+            DepthConvBlock(out_chans // 4, out_chans // 4),
+            ResidualBlock(out_chans // 4, out_chans // 2),
+            nn.LeakyReLU(True),
+            # Output mu and logvar, so out_chans * 2 for the two parameters
+            nn.Conv2d(out_chans // 2, out_chans * 2, kernel_size=1),
+        )
+
+    def forward(self, prev_img_feat, label_feat):
+        # Input features from the previous frame and current label
+        feature = torch.cat([prev_img_feat, label_feat], dim=1)
+        parm = super().forward(feature)
+        mu, logvar = torch.chunk(parm, 2, dim=1)
+        return mu, logvar
+
+# In __all__ list, add the new module
+__all__ = [
+    "Generator",
+    "RGB_Encoder",
+    "Gaussian_Predictor",
+    "Decoder_Fusion",
+    "Label_Encoder",
+    "Learned_Prior_Predictor", # Add this
+]
+
+# ... (rest of the file)
 
 class Generator(nn.Sequential):
     def __init__(self, input_nc, output_nc):
@@ -132,8 +171,10 @@ class Decoder_Fusion(nn.Sequential):
             nn.Conv2d(out_chans // 2, out_chans, 1, 1),
         )
 
-    def forward(self, img, label, parm):
-        feature = torch.cat([img, label, parm], dim=1)
+    # --- MODIFIED: Add skip_feat as an argument ---
+    def forward(self, img, label, parm, skip_feat):
+        # Concatenate skip_feat with other features
+        feature = torch.cat([img, label, parm, skip_feat], dim=1)
         return super().forward(feature)
 
 

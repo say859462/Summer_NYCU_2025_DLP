@@ -12,6 +12,7 @@ from modules import (
     Decoder_Fusion,
     Label_Encoder,
     RGB_Encoder,
+    Learned_Prior_Predictor,
 )
 
 from dataloader import Dataset_Dance
@@ -47,6 +48,26 @@ def kl_criterion(mu, logvar, batch_size):
     KLD /= batch_size
     return KLD
 
+def kl_criterion_lp(posterior_mu, posterior_logvar, prior_mu, prior_logvar, batch_size):
+    """
+    Calculates the KL divergence between two diagonal Gaussians: D_KL(q || p).
+    q is the posterior distribution.
+    p is the prior distribution.
+    """
+    # 獲取變異數
+    posterior_var = posterior_logvar.exp()
+    prior_var = prior_logvar.exp()
+
+    # 計算 KL 散度
+    # 公式: 0.5 * sum( (var_q + (mu_q - mu_p)^2) / var_p - 1 + log(var_p) - log(var_q) )
+    kl_div = 0.5 * torch.sum(
+        prior_logvar - posterior_logvar +
+        (posterior_var + (posterior_mu - prior_mu).pow(2)) / prior_var -
+        1
+    )
+    
+    # 返回每個樣本的平均 KL 散度
+    return kl_div / batch_size
 
 class kl_annealing:
     def __init__(self, args, current_epoch=0):
@@ -135,13 +156,16 @@ class VAE_Model(nn.Module):
         # Modules to transform image from RGB-domain to feature-domain
         self.frame_transformation = RGB_Encoder(3, args.F_dim)
         self.label_transformation = Label_Encoder(3, args.L_dim)
-
+        self.Learned_Prior = Learned_Prior_Predictor(
+            args.F_dim + args.L_dim, args.N_dim
+        )
         # Conduct Posterior prediction in Encoder
         self.Gaussian_Predictor = Gaussian_Predictor(
             args.F_dim + args.L_dim, args.N_dim
         )
+        decoder_fusion_in_dim = args.F_dim + args.L_dim + args.N_dim + args.F_dim
         self.Decoder_Fusion = Decoder_Fusion(
-            args.F_dim + args.L_dim + args.N_dim, args.D_out_dim
+            decoder_fusion_in_dim, args.D_out_dim
         )
 
         # Generative model
@@ -189,8 +213,8 @@ class VAE_Model(nn.Module):
 
     def training_stage(self):
 
-        min_val_loss = 0.000399
-        max_psnr = 37.197720
+        min_val_loss = np.inf
+        max_psnr = 0.0
 
         for i in range(self.current_epoch, self.args.num_epoch):
             train_loader = self.train_dataloader()
@@ -240,22 +264,18 @@ class VAE_Model(nn.Module):
             )
 
             # We starting to save the model weight until over 10 epochs
-            if avg_psnr > max_psnr and self.current_epoch >= 5:
+            if (
+                avg_psnr > max_psnr or val_loss < min_val_loss
+            ) and self.current_epoch >= 5:
                 max_psnr = max(avg_psnr, max_psnr)
-                self.save(
-                    os.path.join(
-                        self.args.save_root,
-                        f"{self.model_prefix}_psnr_{max_psnr:.6f}.ckpt",
-                    )
-                )
-            if val_loss < min_val_loss and self.current_epoch >= 5:
                 min_val_loss = min(val_loss, min_val_loss)
                 self.save(
                     os.path.join(
                         self.args.save_root,
-                        f"{self.model_prefix}_val_loss_{min_val_loss:.6f}.ckpt",
+                        f"{self.model_prefix}_psnr_{avg_psnr:.6f}_val_loss_{val_loss:.6f}.ckpt",
                     )
                 )
+
             # Save the history for plotting
             self.history["train_loss"].append(loss.item())
             self.history["val_loss"].append(val_loss)
@@ -269,7 +289,7 @@ class VAE_Model(nn.Module):
 
             self.current_epoch += 1
             # update learning rate based on avg psnr
-            # self.scheduler.step()
+            self.scheduler.step()
             self.scheduler2.step(avg_psnr)
 
             # update kl annealing and teacher forcing ratio
@@ -399,22 +419,28 @@ class VAE_Model(nn.Module):
         loss = torch.zeros(1, device=self.args.device)
         beta = self.kl_annealing.get_beta()
 
+        with torch.no_grad(): # No need to track gradients for the skip feature source
+            skip_feat = self.frame_transformation(imgs[:, 0])
+        
         for i in range(1, self.train_vi_len):
             prev_img = imgs[:, i - 1] if adapt_TeacherForcing else pred_img
 
             gt_img_feat = self.frame_transformation(imgs[:, i])
-            pred_img_feat = self.frame_transformation(prev_img)
+            prev_img_feat = self.frame_transformation(prev_img)
 
             label_feat = self.label_transformation(labels[:, i])
 
-            z, mu, logvar = self.Gaussian_Predictor(gt_img_feat, label_feat)
+            posterior_z, posterior_mu, posterior_logvar = self.Gaussian_Predictor(gt_img_feat, label_feat)
+            prior_mu, prior_logvar = self.Learned_Prior(prev_img_feat, label_feat)
 
-            decorder_fusion_out = self.Decoder_Fusion(pred_img_feat, label_feat, z)
+            decorder_fusion_out = self.Decoder_Fusion(prev_img_feat, label_feat, posterior_z, skip_feat)
             pred_img = self.Generator(decorder_fusion_out)
 
-            loss += self.mse_criterion(pred_img, imgs[:, i]) + beta * kl_criterion(
-                mu, logvar, self.batch_size
-            )
+            mse_loss = self.mse_criterion(pred_img, imgs[:, i])
+            # The KL loss is now between the posterior and the learned prior
+            kld_loss = kl_criterion_lp(posterior_mu, posterior_logvar, prior_mu, prior_logvar, self.batch_size)
+            
+            loss += mse_loss + beta * kld_loss
 
         # Divide (self.train_vi_len - 1), since we skip the prediction of first frame
         loss = loss / (self.train_vi_len - 1)
@@ -433,35 +459,58 @@ class VAE_Model(nn.Module):
 
         return loss
 
-    def val_one_step(self, imgs, labels):
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
+    def val_one_step(self, imgs, labels):
         # imgs shape: torch.Size([1, 630, 3, 32, 64])
         pred_img = imgs[:, 0]
-        loss = torch.zeros(1, device=self.args.device)
+        loss = torch.zeros(1) # Loss is on CPU now
         beta = self.kl_annealing.get_beta()
         psnr = []
+        with torch.no_grad():
+            skip_feat = self.frame_transformation(imgs[:, 0])
+        # Keep track of the previous frame's feature
+        prev_img_feat = self.frame_transformation(pred_img)
+
         for i in range(1, self.val_vi_len):
-            prev_img = pred_img
-
-            gt_img_feat = self.frame_transformation(imgs[:, i])
-            pred_img_feat = self.frame_transformation(prev_img)
-
+            # --- CORRECTED INFERENCE LOGIC ---
+            # DO NOT use ground truth future frame here.
+            
+            # Feature from the current pose label
             label_feat = self.label_transformation(labels[:, i])
 
-            z, mu, logvar = self.Gaussian_Predictor(gt_img_feat, label_feat)
+            # 1. Get the PRIOR distribution from the Learned Prior Network
+            prior_mu, prior_logvar = self.Learned_Prior(prev_img_feat, label_feat)
 
-            decorder_fusion_out = self.Decoder_Fusion(pred_img_feat, label_feat, z)
+            # 2. Sample z from this PRIOR distribution for generation
+            z = self.reparameterize(prior_mu, prior_logvar)
+
+            # 3. Generate the next frame
+            decorder_fusion_out = self.Decoder_Fusion(prev_img_feat, label_feat, z, skip_feat)
             pred_img = self.Generator(decorder_fusion_out)
-
-            loss += self.mse_criterion(pred_img, imgs[:, i]) + beta * kl_criterion(
-                mu, logvar, self.batch_size
-            )
+            
+            # For validation loss, we can still compare to ground truth
+            # We can use the posterior from ground truth to calculate a consistent validation loss
+            gt_img_feat = self.frame_transformation(imgs[:, i])
+            _, posterior_mu, posterior_logvar = self.Gaussian_Predictor(gt_img_feat, label_feat)
+            
+            mse_loss = self.mse_criterion(pred_img, imgs[:, i])
+            kld_loss = kl_criterion_lp(posterior_mu, posterior_logvar, prior_mu, prior_logvar, 1) # Batch size is 1 for val
+            
+            loss += mse_loss.cpu() + (beta * kld_loss).cpu()
             psnr.append(Generate_PSNR(pred_img, imgs[:, i]).cpu().item())
 
-        # Divide (self.train_vi_len - 1), since we skip the prediction of first frame
+            # Update prev_img_feat for the next iteration using the newly generated frame
+            prev_img_feat = self.frame_transformation(pred_img)
+
+
+        # Divide (self.val_vi_len - 1), since we skip the prediction of first frame
         loss = loss / (self.val_vi_len - 1)
 
-        return loss.cpu().item(), np.mean(psnr), psnr
+        return loss.item(), np.mean(psnr), psnr
 
     def make_gif(self, images_list, img_name):
         new_list = []
