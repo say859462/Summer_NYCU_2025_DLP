@@ -203,9 +203,10 @@ def compute_distributional_loss(
     is_weights=None,
 ):
     """
-    compute_distributional_loss (C51 演算法)
+    compute_distributional_loss
     :return: (loss, abs_errors) a tuple containing the final loss and the absolute errors for PER
     """
+    device = next(q_net.parameters()).device
     with torch.no_grad():
 
         next_q_values = q_net.get_q_values(next_states)
@@ -224,12 +225,12 @@ def compute_distributional_loss(
         l[(u > 0) * (l == u)] -= 1
         u[(l < (n_atoms - 1)) * (l == u)] += 1
 
-        m = torch.zeros(batch_size, n_atoms, device=q_net.device)
+        m = torch.zeros(batch_size, n_atoms, device=device)
         offset = (
             torch.linspace(0, (batch_size - 1) * n_atoms, batch_size)
             .long()
             .unsqueeze(1)
-            .to(q_net.device)
+            .to(device)
         )
 
         m.view(-1).index_add_(

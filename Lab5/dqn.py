@@ -518,7 +518,11 @@ class DQNAgent:
                 torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
             )
             with torch.no_grad():
-                action = self.q_net(state_tensor).argmax().item()
+                if self.use_rainbow:
+                    q_values = self.q_net.get_q_values(state_tensor)
+                else:
+                    q_values = self.q_net(state_tensor)
+                action = q_values.argmax().item()
 
             next_obs, reward, terminated, truncated, _ = self.test_env.step(action)
             done = terminated or truncated
@@ -636,9 +640,16 @@ class DQNAgent:
 
         # NOTE: Enable this part if "loss" is defined
         if self.train_count % 1000 == 0:
-            print(
-                f"[Train #{self.train_count}] Loss: {loss.item():.4f} Q mean: {q_values.mean().item():.3f} std: {q_values.std().item():.3f}"
-            )
+            if self.use_dist:
+                # Ouput Loss only for Distributional DQN
+                print(
+                    f"[Train #{self.train_count}] Loss: {loss.item():.4f} (Distributional Mode)"
+                )
+            else:
+                # Output Loss and Q-value statistics for standard DQN
+                print(
+                    f"[Train #{self.train_count}] Loss: {loss.item():.4f} Q mean: {q_values.mean().item():.3f} std: {q_values.std().item():.3f}"
+                )
 
 
 if __name__ == "__main__":
@@ -707,7 +718,7 @@ if __name__ == "__main__":
         run_name += "-Rainbow"
         args.use_ddqn = True
         args.use_per = True
-        args.n_steps = 5
+        args.n_steps = 3
     else:
         run_name += "-VanillaDQN"
         if args.use_ddqn:
@@ -716,7 +727,6 @@ if __name__ == "__main__":
             run_name += "+PER"
         if args.n_steps > 1:
             run_name += f"+{args.n_steps}steps"
-
 
     run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}"
 

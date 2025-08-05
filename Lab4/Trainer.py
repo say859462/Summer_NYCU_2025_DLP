@@ -244,7 +244,8 @@ class VAE_Model(nn.Module):
                 max_psnr = max(avg_psnr, max_psnr)
                 self.save(
                     os.path.join(
-                        self.args.save_root, f"{self.model_prefix}_psnr_{max_psnr:.6f}.ckpt"
+                        self.args.save_root,
+                        f"{self.model_prefix}_psnr_{max_psnr:.6f}.ckpt",
                     )
                 )
             if val_loss < min_val_loss and self.current_epoch >= 5:
@@ -560,23 +561,21 @@ class VAE_Model(nn.Module):
             checkpoint = torch.load(self.args.ckpt_path, weights_only=False)
             self.load_state_dict(checkpoint["state_dict"], strict=True)
 
-            self.args.lr = checkpoint["lr"]
+            # self.args.lr = checkpoint["lr"]
 
             self.tfr = checkpoint["tfr"]
 
-            # 這裡將weight_dcay 調低以改善psnr提升 5e-4 -> 1e-5
             self.optim = optim.Adam(
                 self.parameters(), lr=self.args.lr, weight_decay=1e-5
             )
-
             self.optim.load_state_dict(checkpoint["optimizer"])
 
+            for i in self.optim.param_groups:
+                i["lr"] = checkpoint["lr"]
 
             self.scheduler = optim.lr_scheduler.MultiStepLR(
                 self.optim,
-                milestones=[
-                    2,
-                ],
+                milestones=[],
                 gamma=0.1,
             )
             self.scheduler2 = optim.lr_scheduler.ReduceLROnPlateau(
@@ -584,7 +583,7 @@ class VAE_Model(nn.Module):
                 mode="max",
                 factor=0.5,
                 patience=5,
-                min_lr=1e-6,
+                min_lr=1e-5,
             )
             self.kl_annealing = kl_annealing(
                 self.args, current_epoch=checkpoint["last_epoch"]
