@@ -28,10 +28,8 @@ class DQN(nn.Module):
             # The input is a stack of 4 frames, each frame is a grayscale image of size 84x84
             self.network = nn.Sequential(
                 nn.Conv2d(4, 32, kernel_size=8, stride=4),
-                nn.BatchNorm2d(32),
                 nn.ReLU(),
                 nn.Conv2d(32, 64, kernel_size=4, stride=2),
-                nn.BatchNorm2d(64),
                 nn.ReLU(),
                 nn.Conv2d(64, 64, kernel_size=3, stride=1),
                 nn.ReLU(),
