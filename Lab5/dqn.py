@@ -80,7 +80,7 @@ class DQN(nn.Module):
 
     def forward(self, x):
         if x.dim() == 4:
-            x = x / 255.0  # Normalize the input for Atari games
+            x = x / 255.0
         return self.network(x)
 
 
@@ -133,7 +133,7 @@ class PrioritizedReplayBuffer:
         self.beta = beta
         self.eps = 0.01
 
-    def add(self, transition, error):
+    def add(self, transition, error=None):
         max_p = np.max(self.tree.tree[-self.tree.capacity :])
 
         # If there's no element in the tree, set max_p to 1.0
@@ -145,7 +145,7 @@ class PrioritizedReplayBuffer:
     def __len__(self):
         return self.tree.n_entries
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, beta=0.4):
 
         # Store the sample drawed from the replay memory
         b_idx = np.empty((batch_size,), dtype=np.int32)
@@ -168,7 +168,7 @@ class PrioritizedReplayBuffer:
 
             # calculate the importance sampling weight
             # w = ( 1/  (N*P(I)) ) ^ beta
-            is_weights[i, 0] = np.power(self.tree.n_entries * sampling_prob, -self.beta)
+            is_weights[i, 0] = np.power(self.tree.n_entries * sampling_prob, -beta)
             b_idx[i] = idx
             b_memory.append(data)
 
@@ -268,7 +268,17 @@ class DQNAgent:
             self.n_step_buffer = deque(maxlen=self.n_steps)
 
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=args.lr)
-
+        self.scheduler = None
+        if args.use_lr_scheduler:
+            print(
+                f"Using ExponentialLR scheduler with gamma={args.lr_decay_gamma} and step={args.lr_scheduler_step}"
+            )
+            self.scheduler = optim.lr_scheduler.ExponentialLR(
+                self.optimizer, gamma=args.lr_decay_gamma
+            )
+            self.lr_scheduler_step = args.lr_scheduler_step
+        self.per_beta_start = args.per_beta
+        self.total_steps = args.total_steps
         self.batch_size = args.batch_size
         self.gamma = args.discount_factor
         self.epsilon = args.epsilon_start
@@ -287,7 +297,7 @@ class DQNAgent:
         self.replay_start_size = args.replay_start_size
         self.target_update_frequency = args.target_update_frequency
         self.train_per_step = args.train_per_step
-        self.save_dir = args.save_dir + f"\{env_name}"
+        self.save_dir = args.save_dir + f"\{env_name}_{args.wandb_run_name}"
 
         print(
             f"Running with settings: DDQN={self.use_ddqn}, PER={self.use_per}, N-steps={self.n_steps}"
@@ -358,6 +368,9 @@ class DQNAgent:
             # step, just like taking one step in the game
             while not done and step_count < self.max_episode_steps:
 
+                if self.use_noisy:
+                    self.q_net.reset_noise()
+                    self.target_net.reset_noise()
                 # select action using epsilon-greedy policy
                 action = self.select_action(state)
 
@@ -397,6 +410,7 @@ class DQNAgent:
                             self.memory.append(n_step_transition)
                 else:  # 1-step return
                     if self.use_per:
+
                         self.memory.add(transition, None)
                     else:
                         self.memory.append(transition)
@@ -408,10 +422,12 @@ class DQNAgent:
                 if self.n_steps > 1 and done:
                     while len(self.n_step_buffer) > 0:
                         n_step_transition = self._get_n_step_info()
+                        s_t, a_t, R_t_n, s_t_n, _ = n_step_transition
+                        corrected_transition = (s_t, a_t, R_t_n, s_t_n, True)
                         if self.use_per:
-                            self.memory.add(n_step_transition, None)
+                            self.memory.add(corrected_transition)
                         else:
-                            self.memory.append(n_step_transition)
+                            self.memory.append(corrected_transition)
 
                         self.n_step_buffer.popleft()
 
@@ -436,6 +452,7 @@ class DQNAgent:
                     print(
                         f"[Collect] Ep: {ep} Step: {step_count} Env_count: {self.env_count} Train_count: {self.train_count} Eps: {self.epsilon:.4f}"
                     )
+                    current_lr = self.optimizer.param_groups[0]["lr"]
                     wandb.log(
                         {
                             "Episode": ep,
@@ -443,7 +460,9 @@ class DQNAgent:
                             "Env Step Count": self.env_count,
                             "Update Count": self.train_count,
                             "Epsilon": self.epsilon,
-                        }
+                            "Learning Rate": current_lr,
+                        },
+                        step=self.env_count,
                     )
                     ########## YOUR CODE HERE  ##########
                     # Add additional wandb logs for debugging if needed
@@ -468,12 +487,15 @@ class DQNAgent:
 
             ########## END OF YOUR CODE ##########
 
-            if ep % 20 == 0:
+            if ep % 10 == 0:
                 eval_reward = self.evaluate()
                 self.eval_scores.append(eval_reward)
                 if eval_reward > self.best_reward:
                     self.best_reward = eval_reward
-                    model_path = os.path.join(self.save_dir, "best_model.pt")
+                    model_path = os.path.join(
+                        self.save_dir,
+                        f"best_model_{self.env_count}_{self.best_reward}.pt",
+                    )
                     torch.save(self.q_net.state_dict(), model_path)
                     print(
                         f"Saved new best model to {model_path} with reward {eval_reward}"
@@ -548,7 +570,14 @@ class DQNAgent:
         self.train_count += 1
 
         if self.use_per:
-            tree_indices, mini_sample, is_weights = self.memory.sample(self.batch_size)
+            beta = self.per_beta_start + (1.0 - self.per_beta_start) * (
+                self.train_count / self.total_steps
+            )
+            beta = min(1.0, beta)  # Clamp beta to [0, 1]
+
+            tree_indices, mini_sample, is_weights = self.memory.sample(
+                self.batch_size, beta
+            )
             states, actions, rewards, next_states, dones = zip(*mini_sample)
             is_weights = torch.from_numpy(is_weights).to(self.device).float()
         else:
@@ -629,14 +658,16 @@ class DQNAgent:
         self.optimizer.step()
         ########## END OF YOUR CODE ##########
 
+        # Update the learning rate if a scheduler is used
+        if (
+            self.scheduler is not None
+            and self.train_count % self.lr_scheduler_step == 0
+        ):
+            self.scheduler.step()
+
         # Update the model weight of target network
         if self.train_count % self.target_update_frequency == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
-
-        # --- Reset Noisy Layers' noise ---
-        if self.use_noisy:
-            self.q_net.reset_noise()
-            self.target_net.reset_noise()
 
         # NOTE: Enable this part if "loss" is defined
         if self.train_count % 1000 == 0:
@@ -680,7 +711,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use-per", action="store_true", help="Use Prioritized Experience Replay (PER)"
     )
-    parser.add_argument("--n-steps", type=int, default=1, help="Use N-step return")
 
     # PER Hyperparameters
     parser.add_argument("--per-alpha", type=float, default=0.6, help="Alpha for PER")
@@ -691,6 +721,15 @@ if __name__ == "__main__":
         "--use-rainbow",
         action="store_true",
         help="Use Rainbow components (Dueling, Distributional, Noisy)",
+    )
+    parser.add_argument(
+        "--n-steps", type=int, default=1, help="N-step return for Rainbow DQN"
+    )
+    parser.add_argument(
+        "--total_steps",
+        type=int,
+        default=500000,
+        help="Total training steps for beta annealing schedule",
     )
 
     # Distributinoal RL Parameters
@@ -710,6 +749,25 @@ if __name__ == "__main__":
         help="Maximum value of support for Distributional RL",
     )
 
+    # Learning Rate Scheduler
+    parser.add_argument(
+        "--use-lr-scheduler",
+        action="store_true",
+        help="Enable learning rate scheduler",
+    )
+    parser.add_argument(
+        "--lr-decay-gamma",
+        type=float,
+        default=0.999,
+        help="Gamma for ExponentialLR scheduler",
+    )
+    parser.add_argument(
+        "--lr-scheduler-step",
+        type=int,
+        default=5000,
+        help="Step frequency for LR scheduler",
+    )
+
     args = parser.parse_args()
 
     run_name = f"{args.env_name}"
@@ -718,7 +776,6 @@ if __name__ == "__main__":
         run_name += "-Rainbow"
         args.use_ddqn = True
         args.use_per = True
-        args.n_steps = 3
     else:
         run_name += "-VanillaDQN"
         if args.use_ddqn:
@@ -728,7 +785,7 @@ if __name__ == "__main__":
         if args.n_steps > 1:
             run_name += f"+{args.n_steps}steps"
 
-    run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}"
+    run_name += f"-lr{args.lr}-bs{args.batch_size}-eps_decay{args.epsilon_decay}-ms{args.memory_size}-replay_start{args.replay_start_size}_target_update{args.target_update_frequency}_nstep_{args.n_steps}"
 
     if args.env_name == "ALE/Pong-v5":
         wandb.init(project=f"DLP-Lab5-DQN-PongV5", name=run_name, save_code=True)
@@ -736,6 +793,6 @@ if __name__ == "__main__":
         wandb.init(
             project=f"DLP-Lab5-DQN-{args.env_name}", name=run_name, save_code=True
         )
-
+    args.wandb_run_name = run_name
     agent = DQNAgent(args=args, env_name=args.env_name)
     agent.run(episodes=args.episode)

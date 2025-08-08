@@ -146,8 +146,7 @@ class RainbowDQN(nn.Module):
             )
 
     def forward(self, x):
-        if x.dim() == 4:
-            x = x / 255.0
+
         batch_size = x.size(0)
 
         features = self.feature_layer(x)

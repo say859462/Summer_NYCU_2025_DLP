@@ -28,3 +28,8 @@ wandb/
 Lab4/modules/modules.py
 Lab4/Trainer.py
 Lab4/Tester.py
+Lab5/test_model.py
+Lab5/eval_videos/
+
+/Final Project/
+Lab6/iclevr/

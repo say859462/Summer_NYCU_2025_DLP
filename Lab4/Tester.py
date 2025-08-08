@@ -195,7 +195,7 @@ class Test_model(VAE_Model):
         self.make_gif(generated_frames_for_gif, os.path.join(self.args.save_root, f"pred_seq{idx}.gif"))
 
         # Reshape the generated frame to (630, 3 * 64 * 32)
-        generated_frames_for_submission = generated_frames_for_submission.reshape(generated_frames_for_submission.shape[0], -1)
+        generated_frames_for_submission = generated_frame.reshape(630, -1)
 
         return generated_frames_for_submission
 
