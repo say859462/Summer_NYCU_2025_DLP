@@ -1,0 +1,5 @@
+gymnasium==1.1.1
+ale-py==0.11.2
+opencv-python
+torch
+wandb
