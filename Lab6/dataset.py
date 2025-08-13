@@ -49,11 +49,9 @@ class iCLEVRDataset(Dataset):
             img_path = "iclevr\\" + img_name
             image = Image.open(img_path).convert("RGB")
             labels = self.data[img_name]
-            # Transform the image if a transform is provided (e.g., normalization, tensor conversion)
             if self.transform:
                 image = self.transform(image)
         else:
-            # Testing data , we expect that the model could generate the image corresponding to the labels
             image = torch.zeros(3, 64, 64)
             labels = self.data[idx]
 
@@ -65,14 +63,12 @@ class iCLEVRDataset(Dataset):
 
 
 if __name__ == "__main__":
-    # Example usage
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
     dataset = iCLEVRDataset(mode="train", transform=transform)
     print(f"Dataset initialized with {len(dataset)} samples.")
 
-    # Create a DataLoader
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
     for batch in dataloader:

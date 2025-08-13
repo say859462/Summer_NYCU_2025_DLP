@@ -8,8 +8,8 @@ from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 from torchvision.utils import make_grid, save_image
 from tqdm.auto import tqdm
-
-
+from evaluator import evaluation_model
+from PIL import Image
 from dataset import iCLEVRDataset
 from conditionDDPM import DiffusionModel
 
@@ -185,7 +185,7 @@ def inference(args):
         cond_dim=args.cond_dim,
     ).to(device)
 
-    model_path = Path(args.workspace) / "checkpoints_best" / "best_model.pth"
+    model_path = Path(args.workspace) / "DDPM_CKPT" / "best_model.pth"
     if not model_path.exists():
         print(f"Error: Best model not found at {model_path}")
         print("Please run training first to generate the best model.")
@@ -224,6 +224,104 @@ def inference(args):
 
     generate_and_save("test")
     generate_and_save("new_test")
+    print("\nStarting evaluation...")
+    evaluator = evaluation_model()
+
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    def run_evaluation(mode):
+        data = iCLEVRDataset(mode=mode)
+        image_dir = test_dir if mode == "test" else new_test_dir
+        total_score = 0.0
+
+        for i, (_, gt_condition) in enumerate(data):
+            img_path = image_dir / f"{i}.png"
+            if not img_path.exists():
+                print(f"Warning: Generated image not found at {img_path}")
+                continue
+
+            image = Image.open(img_path).convert("RGB")
+            image_tensor = eval_transform(image).unsqueeze(0).to(device)
+
+            gt_condition = gt_condition.unsqueeze(0).to(device)
+
+            score = evaluator.eval(image_tensor, gt_condition)
+            total_score += score
+
+        avg_score = total_score / len(data)
+        print(f"Average accuracy for {mode}.json: {avg_score:.4f}")
+        return avg_score
+
+    test_acc = run_evaluation("test")
+    new_test_acc = run_evaluation("new_test")
+
+
+@torch.no_grad()
+def generate_denoising_process(args):
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    output_dir = Path(args.workspace)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model = DiffusionModel(
+        resolution=args.resolution,
+        num_classes=24,
+        cond_dim=args.cond_dim,
+    ).to(device)
+
+    model_path = Path(args.model_path)
+    if not model_path.exists():
+        print(f"Error: Model not found at {model_path}")
+        return
+
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=1000, beta_schedule="squaredcos_cap_v2"
+    )
+
+    dataset = iCLEVRDataset()
+    object_to_idx = dataset.object_to_idx
+
+    target_labels = ["red sphere", "cyan cylinder", "cyan cube"]
+
+    condition = torch.zeros(1, dataset.num_classes, device=device)
+    for obj in target_labels:
+        if obj in object_to_idx:
+            condition[0, object_to_idx[obj]] = 1
+        else:
+            print(f" Warning: Label '{obj}' not found in object mapping.")
+
+    image = torch.randn((1, 3, args.resolution, args.resolution), device=device)
+
+    noise_scheduler.set_timesteps(50)
+
+    denoising_steps_vis = []
+
+    num_images_to_show = 7
+    save_every_n_steps = len(noise_scheduler.timesteps) // num_images_to_show
+
+    for i, t in enumerate(tqdm(noise_scheduler.timesteps)):
+        noise_pred = model(image, t, condition)
+
+        image = noise_scheduler.step(noise_pred, t, image).prev_sample
+
+        if i % save_every_n_steps == 0:
+            img_to_save = (image.clone() / 2 + 0.5).clamp(0, 1)
+            denoising_steps_vis.append(img_to_save)
+
+    grid = make_grid(torch.cat(denoising_steps_vis), nrow=num_images_to_show)
+    save_path = output_dir / "denoising_process_grid.png"
+    save_image(grid, save_path)
+
+    print(f"Denoising process grid saved to: {save_path}")
 
 
 if __name__ == "__main__":
@@ -235,6 +333,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--train", action="store_true", help="Train the model")
     parser.add_argument("--inference", action="store_true", help="Generate images")
+    parser.add_argument("--test", action="store_true")
     parser.add_argument("--resolution", type=int, default=64)
     parser.add_argument("--cond_dim", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=100)
@@ -242,11 +341,14 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--inference_epoch", type=int, default=100)
+    parser.add_argument(
+        "--model_path", type=str, default="tmp\\DDPM\\DDPM_CKPT\\best_model.pth"
+    )
     args = parser.parse_args()
 
     if args.train:
         train(args)
     elif args.inference:
         inference(args)
-    else:
-        print("Please specify --train or --inference.")
+    elif args.test:
+        generate_denoising_process(args)

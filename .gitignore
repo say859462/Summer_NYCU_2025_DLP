@@ -37,3 +37,7 @@ Lab5/LAB5_314551113.mp4
 Lab5/LAB5_314551113_劉哲良.zip
 Lab6/result/DDPM_CKPT/best_model.pth
 *.pt
+Lab6/acgan_result/ACGAN_inference_images/*.png
+*.pth
+*.zip
+*.png

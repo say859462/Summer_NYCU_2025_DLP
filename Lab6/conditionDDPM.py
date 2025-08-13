@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from diffusers import UNet2DConditionModel
 
+#Reference : https://arxiv.org/pdf/2006.11239 , https://github.com/huggingface/diffusion-models-class
+
 class DiffusionModel(nn.Module):
 
     def __init__(self,
@@ -11,8 +13,6 @@ class DiffusionModel(nn.Module):
                  num_classes=24,
                  cond_dim=128):
         super().__init__()
-
-        # Initialize UNet2DConditionModel with the specified parameters.
         self.unet = UNet2DConditionModel(
             sample_size=resolution,
             in_channels=in_channels,
@@ -29,9 +29,6 @@ class DiffusionModel(nn.Module):
             ),
             cross_attention_dim=cond_dim,
         )
-
-        # Linear layer to embed the 24 multi-hot condition labels into the required dimension.
-        # So that the UNet can use these embeddings as additional context.
         self.label_embedder = nn.Linear(num_classes, cond_dim)
 
     def forward(self, noisy_image, timesteps, condition_labels):
