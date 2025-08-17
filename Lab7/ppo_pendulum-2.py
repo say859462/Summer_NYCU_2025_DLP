@@ -21,7 +21,10 @@ from torch.distributions import Normal
 import argparse
 import wandb
 from tqdm import tqdm
+import os
 
+
+# Reference :https://github.com/MrSyee/pg-is-all-you-need/tree/master
 def init_layer_uniform(layer: nn.Linear, init_w: float = 3e-3) -> nn.Linear:
     """Init uniform parameters on the single layer."""
     layer.weight.data.uniform_(-init_w, init_w)
@@ -43,13 +46,32 @@ class Actor(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+        self.hidden = nn.Linear(in_dim, 128)
+
+        self.mu_layer = nn.Linear(128, out_dim)
+        self.mu_layer = init_layer_uniform(self.mu_layer)
+
+        self.log_std_layer = nn.Linear(128, out_dim)
+        self.log_std_layer = init_layer_uniform(self.log_std_layer)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
-        
+
         ############TODO#############
+        x = F.relu(self.hidden(state))
+
+        mu = torch.tanh(self.mu_layer(x)) * 2
+        log_std = torch.tanh(self.log_std_layer(x))  # [-1,1]
+        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
+            log_std + 1
+        )  # [0,2] => [0,-40] => [0,-20] => [0,-20]
+        std = torch.exp(log_std)
+
+        dist = Normal(mu, std)
+        action = dist.sample()
 
         #############################
 
@@ -63,28 +85,42 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        
+        self.hidden = nn.Linear(in_dim, 128)
+        self.out = nn.Linear(128, 1)
+        self.out = init_layer_uniform(self.out)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
-        
-        ############TODO#############
 
+        ############TODO#############
+        x = F.relu(self.hidden(state))
+        value = self.out(x)
         #############################
 
         return value
-    
+
+
 def compute_gae(
-    next_value: list, rewards: list, masks: list, values: list, gamma: float, tau: float) -> List:
+    next_value: list, rewards: list, masks: list, values: list, gamma: float, tau: float
+) -> List:
     """Compute gae."""
 
     ############TODO#############
+    values = values + [next_value]
+    gae = 0
+    returns = []
 
+    for step in reversed(range(len(rewards))):
+        # TD error
+        delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
+        gae = delta + gamma * tau * masks[step] * gae
+        returns.insert(0, gae + values[step])
     #############################
-    return gae_returns
+    return returns
 
-# PPO updates the model several times(update_epoch) using the stacked memory. 
+
+# PPO updates the model several times(update_epoch) using the stacked memory.
 # By ppo_iter function, it can yield the samples of stacked memory by interacting a environment.
 def ppo_iter(
     update_epoch: int,
@@ -104,6 +140,7 @@ def ppo_iter(
             yield states[rand_ids, :], actions[rand_ids], values[rand_ids], log_probs[
                 rand_ids
             ], returns[rand_ids], advantages[rand_ids]
+
 
 class PPOAgent:
     """PPO Agent.
@@ -137,10 +174,9 @@ class PPOAgent:
         self.entropy_weight = args.entropy_weight
         self.seed = args.seed
         self.update_epoch = args.update_epoch
-        
+
         # device: cpu / gpu
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(self.device)
 
         # networks
         obs_dim = env.observation_space.shape[0]
@@ -235,16 +271,24 @@ class PPOAgent:
 
             # actor_loss
             ############TODO#############
-            # actor_loss = ?
-            
+            surr_loss = ratio * adv
+            clipped_surr_loss = (
+                torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon) * adv
+            )
+
+            entropy = dist.entropy().mean()
+            actor_loss = (
+                -torch.min(surr_loss, clipped_surr_loss).mean()
+                - entropy * self.entropy_weight
+            )
             #############################
 
             # critic_loss
             ############TODO#############
-            # critic_loss = ?
-
+            value = self.critic(state)
+            critic_loss = (return_ - value).pow(2).mean()
             #############################
-            
+
             # train critic
             self.critic_optimizer.zero_grad()
             critic_loss.backward(retain_graph=True)
@@ -269,6 +313,7 @@ class PPOAgent:
     def train(self):
         """Train the PPO agent."""
         self.is_test = False
+        os.makedirs(args.model_save_path, exist_ok=True)
 
         state, _ = self.env.reset(seed=self.seed)
         state = np.expand_dims(state, axis=0)
@@ -279,7 +324,7 @@ class PPOAgent:
         episode_count = 0
         for ep in tqdm(range(1, self.num_episodes)):
             score = 0
-            print("\n")
+            tqdm.write("\n")
             for _ in range(self.rollout_len):
                 self.total_step += 1
                 action = self.select_action(state)
@@ -294,10 +339,29 @@ class PPOAgent:
                     state, _ = self.env.reset(seed=self.seed)
                     state = np.expand_dims(state, axis=0)
                     scores.append(score)
-                    print(f"Episode {episode_count}: Total Reward = {score}")
+                    tqdm.write(f"Episode {episode_count}: Total Reward = {score}")
+                    wandb.log({"episode": ep, "return": score})
                     score = 0
 
+            if ep % 100 == 0:
+
+                torch.save(
+                    {
+                        "actor_state_dict": self.actor.state_dict(),
+                        "critic_state_dict": self.critic.state_dict(),
+                    },
+                    args.model_save_path + f"\\{ep}.pt",
+                )
+
             actor_loss, critic_loss = self.update_model(next_state)
+            # W&B logging
+            wandb.log(
+                {
+                    "step": self.total_step,
+                    "actor loss": actor_loss,
+                    "critic loss": critic_loss,
+                }
+            )
             actor_losses.append(actor_loss)
             critic_losses.append(critic_loss)
 
@@ -307,55 +371,87 @@ class PPOAgent:
     def test(self, video_folder: str):
         """Test the agent."""
         self.is_test = True
-
+        os.makedirs(video_folder, exist_ok=True)
         tmp_env = self.env
         self.env = gym.wrappers.RecordVideo(self.env, video_folder=video_folder)
 
-        state, _ = self.env.reset(seed=self.seed)
-        done = False
-        score = 0
+        total_score = 0.0
+        for i in range(args.test_episode):
+            state, _ = self.env.reset(seed=self.seed + i)
+            done = False
+            score = 0
+            while not done:
+                action = self.select_action(state)
+                next_state, reward, done = self.step(action)
 
-        while not done:
-            action = self.select_action(state)
-            next_state, reward, done = self.step(action)
+                state = next_state
+                score += reward
+            total_score += score
+            tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score} ")
 
-            state = next_state
-            score += reward
+        avg_score = total_score / args.test_episode
+        tqdm.write(
+            f"Average Test Score over {args.test_episode} episodes: {avg_score:.2f}"
+        )
 
-        print("score: ", score)
         self.env.close()
 
         self.env = tmp_env
- 
+
+
 def seed_torch(seed):
     torch.manual_seed(seed)
     if torch.backends.cudnn.enabled:
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-        
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=1e-4)
-    parser.add_argument("--critic-lr", type=float, default=1e-3)
+    parser.add_argument("--actor-lr", type=float, default=1e-3)
+    parser.add_argument("--critic-lr", type=float, default=5e-3)
     parser.add_argument("--discount-factor", type=float, default=0.9)
-    parser.add_argument("--num-episodes", type=float, default=1000)
+    parser.add_argument("--num-episodes", type=float, default=2000)
     parser.add_argument("--seed", type=int, default=77)
-    parser.add_argument("--entropy-weight", type=int, default=1e-2) # entropy can be disabled by setting this to 0
+    parser.add_argument(
+        "--entropy-weight", type=int, default=1e-2
+    )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.8)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epsilon", type=int, default=0.2)
-    parser.add_argument("--rollout-len", type=int, default=2000)  
+    parser.add_argument("--rollout-len", type=int, default=2048)
     parser.add_argument("--update-epoch", type=float, default=64)
+
+    parser.add_argument("--video-path", type=str, default="./PPO_Pendulum_Video")
+    parser.add_argument("--model-path", type=str, default="./task2/best.pt")
+    parser.add_argument("--model-save-path", type=str, default="./task2")
+    parser.add_argument("--train", action="store_true", help="Train the model")
+    parser.add_argument(
+        "--test", action="store_true", help="Test the pre-trained model"
+    )
+    parser.add_argument("--test-episode", type=int, default=20)
     args = parser.parse_args()
- 
+
     # environment
     env = gym.make("Pendulum-v1", render_mode="rgb_array")
     seed = 77
     random.seed(seed)
     np.random.seed(seed)
     seed_torch(seed)
-    wandb.init(project="DLP-Lab7-PPO-Pendulum", name=args.wandb_run_name, save_code=True)
-    
+
     agent = PPOAgent(env, args)
-    agent.train()
+
+    if args.train:
+        wandb.init(
+            project="DLP-Lab7-PPO-Pendulum", name=args.wandb_run_name, save_code=True
+        )
+        agent.train()
+        wandb.finish()
+    elif args.test:
+        checkpoint = torch.load(args.model_path, map_location=agent.device)
+        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        agent.critic.load_state_dict(checkpoint["critic_state_dict"])
+        agent.test(video_folder=args.video_path)
+    else:
+        print("Please specify a mode to run: --train or --test")

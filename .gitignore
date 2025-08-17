@@ -24,7 +24,7 @@ plots/
 Lab4/Lab4.7z
 results/
 wandb/
-
+*.mp4
 Lab4/modules/modules.py
 Lab4/Trainer.py
 Lab4/Tester.py

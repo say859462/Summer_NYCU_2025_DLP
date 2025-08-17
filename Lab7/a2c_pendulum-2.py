@@ -19,6 +19,8 @@ import argparse
 import wandb
 from tqdm import tqdm
 from typing import Tuple
+import os
+
 
 def initialize_uniformly(layer: nn.Linear, init_w: float = 3e-3):
     """Initialize the weights and bias in [-init_w, init_w]."""
@@ -26,23 +28,41 @@ def initialize_uniformly(layer: nn.Linear, init_w: float = 3e-3):
     layer.bias.data.uniform_(-init_w, init_w)
 
 
+# Reference :https://github.com/MrSyee/pg-is-all-you-need/tree/master
+
+
 class Actor(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
         """Initialize."""
         super(Actor, self).__init__()
-        
+
         ############TODO#############
         # Remeber to initialize the layer weights
-        
+        self.hidden1 = nn.Linear(in_dim, 128)
+        # Spec assume that the dist is always gaussian
+        self.mu_layer = nn.Linear(128, out_dim)
+        self.log_std_layer = nn.Linear(128, out_dim)
+
+        initialize_uniformly(self.mu_layer)
+        initialize_uniformly(self.log_std_layer)
         #############################
-        
+
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
 
         ############TODO#############
+        x = F.relu(self.hidden1(state))
 
+        mu = torch.tanh(self.mu_layer(x)) * 2  # Action space of pendulum is [-2,2]
+
+        log_std = F.softplus(self.log_std_layer(x))  # Use log std for stability
+        std = torch.exp(log_std)
+
+        dist = Normal(mu, std)
+        action = dist.sample()
         #############################
 
+        # Actor receive a state then compute the action distribution of that state
         return action, dist
 
 
@@ -50,21 +70,25 @@ class Critic(nn.Module):
     def __init__(self, in_dim: int):
         """Initialize."""
         super(Critic, self).__init__()
-        
+
         ############TODO#############
         # Remeber to initialize the layer weights
-        
+        self.hidden1 = nn.Linear(in_dim, 128)
+        self.out = nn.Linear(128, 1)
+
+        initialize_uniformly(self.out)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
-        
-        ############TODO#############
 
+        ############TODO#############
+        x = F.relu(self.hidden1(state))
+        value = self.out(x)
         #############################
 
         return value
-    
+
 
 class A2CAgent:
     """A2CAgent interacting with environment.
@@ -93,10 +117,9 @@ class A2CAgent:
         self.actor_lr = args.actor_lr
         self.critic_lr = args.critic_lr
         self.num_episodes = args.num_episodes
-        
+
         # device: cpu / gpu
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(self.device)
 
         # networks
         obs_dim = env.observation_space.shape[0]
@@ -143,12 +166,22 @@ class A2CAgent:
         """Update the model by gradient descent."""
         state, log_prob, next_state, reward, done = self.transition
 
+        state = state.to(self.device)
+        next_state = torch.FloatTensor(next_state).to(self.device)
+        reward = torch.FloatTensor([reward]).to(self.device)
+        done = torch.FloatTensor([done]).to(self.device)
+
         # Q_t   = r + gamma * V(s_{t+1})  if state != Terminal
         #       = r                       otherwise
         mask = 1 - done
-        
+
         ############TODO#############
-        # value_loss = ?
+
+        # Critic Loss
+        pred_value = self.critic(state)
+        target_value = reward + self.gamma * self.critic(next_state) * mask
+        value_loss = F.smooth_l1_loss(pred_value, target_value.detach())
+
         #############################
 
         # update value
@@ -158,7 +191,11 @@ class A2CAgent:
 
         # advantage = Q_t - V(s_t)
         ############TODO#############
-        # policy_loss = ?
+        # Actor Loss
+        advantage = (target_value - pred_value).detach()
+
+        policy_loss = -advantage * log_prob + self.entropy_weight * -log_prob
+
         #############################
         # update policy
         self.actor_optimizer.zero_grad()
@@ -169,10 +206,11 @@ class A2CAgent:
 
     def train(self):
         """Train the agent."""
+        os.makedirs(args.model_save_path, exist_ok=True)
         self.is_test = False
         step_count = 0
-        
-        for ep in tqdm(range(1, self.num_episodes)): 
+        best_score = -np.inf
+        for ep in tqdm(range(1, self.num_episodes), desc="Training Episode"):
             actor_losses, critic_losses, scores = [], [], []
             state, _ = self.env.reset(seed=self.seed)
             score = 0
@@ -190,43 +228,70 @@ class A2CAgent:
                 score += reward
                 step_count += 1
                 # W&B logging
-                wandb.log({
-                    "step": step_count,
-                    "actor loss": actor_loss,
-                    "critic loss": critic_loss,
-                    }) 
+                wandb.log(
+                    {
+                        "step": step_count,
+                        "actor loss": actor_loss,
+                        "critic loss": critic_loss,
+                    }
+                )
                 # if episode ends
                 if done:
                     scores.append(score)
-                    print(f"Episode {ep}: Total Reward = {score}")
+                    tqdm.write(f"Episode {ep}: Total Reward = {score}")
                     # W&B logging
-                    wandb.log({
-                        "episode": ep,
-                        "return": score
-                        })  
+                    wandb.log({"episode": ep, "return": score})
+            if ep % 100 == 0:
+                torch.save(
+                    {
+                        "actor_state_dict": self.actor.state_dict(),
+                        "critic_state_dict": self.critic.state_dict(),
+                    },
+                    args.model_save_path + f"\\{ep}.pt",
+                )
+
+            if score > best_score:
+                best_score = score
+                tqdm.write(
+                    f"Episode {ep}: New best score = {score:.4f}! Saving model..."
+                )
+                torch.save(
+                    {
+                        "actor_state_dict": self.actor.state_dict(),
+                        "critic_state_dict": self.critic.state_dict(),
+                    },
+                    args.model_save_path + f"\\best.pt",
+                )
 
     def test(self, video_folder: str):
         """Test the agent."""
         self.is_test = True
+        os.makedirs(video_folder, exist_ok=True)
 
         tmp_env = self.env
         self.env = gym.wrappers.RecordVideo(self.env, video_folder=video_folder)
 
-        state, _ = self.env.reset(seed=self.seed)
-        done = False
-        score = 0
+        total_score = 0.0
+        for i in range(args.test_episode):
+            state, _ = self.env.reset(seed=self.seed + i)
+            done = False
+            score = 0
+            while not done:
+                action = self.select_action(state)
+                next_state, reward, done = self.step(action)
 
-        while not done:
-            action = self.select_action(state)
-            next_state, reward, done = self.step(action)
+                state = next_state
+                score += reward
+            total_score += score
+            tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score} ")
 
-            state = next_state
-            score += reward
-
-        print("score: ", score)
+        avg_score = total_score / args.test_episode
+        tqdm.write(
+            f"Average Test Score over {args.test_episode} episodes: {avg_score:.2f}"
+        )
         self.env.close()
-
         self.env = tmp_env
+
 
 def seed_torch(seed):
     torch.manual_seed(seed)
@@ -235,25 +300,55 @@ def seed_torch(seed):
         torch.backends.cudnn.deterministic = True
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-run")
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--critic-lr", type=float, default=1e-3)
     parser.add_argument("--discount-factor", type=float, default=0.9)
-    parser.add_argument("--num-episodes", type=float, default=1000)
+    parser.add_argument("--num-episodes", type=float, default=2000)
     parser.add_argument("--seed", type=int, default=77)
-    parser.add_argument("--entropy-weight", type=int, default=1e-2) # entropy can be disabled by setting this to 0
+    parser.add_argument(
+        "--entropy-weight", type=float, default=1e-2
+    )  # entropy can be disabled by setting this to 0
+
+    parser.add_argument("--video-path", type=str, default="./A2C_Pendulum_Video")
+    parser.add_argument("--model-path", type=str, default="./task1/best.pt")
+    parser.add_argument("--model-save-path", type=str, default="./task1")
+    parser.add_argument("--train", action="store_true", help="Train the model")
+    parser.add_argument(
+        "--test", action="store_true", help="Test the pre-trained model"
+    )
+    parser.add_argument("--test-episode", type=int, default=20)
     args = parser.parse_args()
-    
-    # environment
+
     env = gym.make("Pendulum-v1", render_mode="rgb_array")
-    seed = 77
+    # environment
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
     seed_torch(seed)
-    wandb.init(project="DLP-Lab7-A2C-Pendulum", name=args.wandb_run_name, save_code=True)
-    
     agent = A2CAgent(env, args)
-    agent.train()
+
+    if args.train:
+
+        args.wandb_run_name += (
+            f"_alr_{args.actor_lr}_clr_{args.critic_lr}_ep_{args.num_episodes}"
+        )
+        wandb.init(
+            project="DLP-Lab7-A2C-Pendulum", name=args.wandb_run_name, save_code=True
+        )
+
+        agent.train()
+        wandb.finish()
+    elif args.test:
+        checkpoint = torch.load(args.model_path, map_location=agent.device)
+        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        agent.critic.load_state_dict(checkpoint["critic_state_dict"])
+
+        agent.test(video_folder=args.video_path)
+
+    else:
+        print("Please specify a mode to run: --train or --test")
+
+    env.close()
