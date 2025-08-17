@@ -321,7 +321,7 @@ class PPOAgent:
         score = 0
         episode_count = 0
         best_avg_score = -np.inf
-        for ep in tqdm(range(1, self.num_episodes + 1), desc="Training Steps"):
+        for ep in tqdm(range(1, self.num_episodes), desc="Training Steps"):
             score = 0
             print("\n")
             for _ in range(self.rollout_len):
@@ -334,21 +334,14 @@ class PPOAgent:
 
                 state = next_state
                 score += reward[0][0]
-
                 # if episode ends
                 if done[0][0]:
                     episode_count += 1
                     state, _ = self.env.reset(seed=self.seed)
                     state = np.expand_dims(state, axis=0)
                     scores.append(score)
+                    wandb.log({"episode": ep, "return": score}, step=self.total_step)
                     avg_score = np.mean(score)
-                    wandb.log(
-                        {
-                            "episode": episode_count,
-                            "return": score,
-                            "step": self.total_step,
-                        }
-                    )
                     if avg_score > best_avg_score:
                         best_avg_score = avg_score
                         tqdm.write(
@@ -363,14 +356,14 @@ class PPOAgent:
                         )
                     tqdm.write(f"Episode {episode_count}: Total Reward = {score}")
                     score = 0
-            if ep % 100 == 0:
+            if (ep + 1) % 100 == 0:
 
                 torch.save(
                     {
                         "actor_state_dict": self.actor.state_dict(),
                         "critic_state_dict": self.critic.state_dict(),
                     },
-                    args.model_save_path + f"\\{ep}.pt",
+                    args.model_save_path + f"\\{ep+1}.pt",
                 )
             actor_loss, critic_loss = self.update_model(next_state)
             # W&B logging
@@ -408,10 +401,8 @@ class PPOAgent:
             total_score += score
             tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score} ")
 
-        avg_score = total_score / args.test_episode
-        tqdm.write(
-            f"Average Test Score over {args.test_episode} episodes: {avg_score:.2f}"
-        )
+        total_score += score.item()
+        tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score.item()} ")
 
         self.env.close()
 

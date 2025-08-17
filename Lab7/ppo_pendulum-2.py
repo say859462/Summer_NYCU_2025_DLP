@@ -174,15 +174,17 @@ class PPOAgent:
         self.entropy_weight = args.entropy_weight
         self.seed = args.seed
         self.update_epoch = args.update_epoch
-
+        
+        
+        
         # device: cpu / gpu
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # networks
-        obs_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
-        self.actor = Actor(obs_dim, action_dim).to(self.device)
-        self.critic = Critic(obs_dim).to(self.device)
+        self.obs_dim = env.observation_space.shape[0]
+        self.action_dim = env.action_space.shape[0]
+        self.actor = Actor(self.obs_dim, self.action_dim).to(self.device)
+        self.critic = Critic(self.obs_dim).to(self.device)
 
         # optimizer
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=0.001)
@@ -322,7 +324,7 @@ class PPOAgent:
         scores = []
         score = 0
         episode_count = 0
-        for ep in tqdm(range(1, self.num_episodes)):
+        for ep in tqdm(range(1, self.num_episodes), desc="Training Steps"):
             score = 0
             tqdm.write("\n")
             for _ in range(self.rollout_len):
@@ -340,17 +342,17 @@ class PPOAgent:
                     state = np.expand_dims(state, axis=0)
                     scores.append(score)
                     tqdm.write(f"Episode {episode_count}: Total Reward = {score}")
-                    wandb.log({"episode": ep, "return": score})
+                    # W&B logging
+                    wandb.log({"episode": ep, "return": score}, step=self.total_step)
                     score = 0
-
-            if ep % 100 == 0:
+            if (ep + 1) % 10 == 0:
 
                 torch.save(
                     {
                         "actor_state_dict": self.actor.state_dict(),
                         "critic_state_dict": self.critic.state_dict(),
                     },
-                    args.model_save_path + f"\\{ep}.pt",
+                    args.model_save_path + f"\\{ep+1}.pt",
                 )
 
             actor_loss, critic_loss = self.update_model(next_state)
@@ -386,8 +388,8 @@ class PPOAgent:
 
                 state = next_state
                 score += reward
-            total_score += score
-            tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score} ")
+            total_score += score.item()
+            tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score.item()} ")
 
         avg_score = total_score / args.test_episode
         tqdm.write(
@@ -409,13 +411,13 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=1e-3)
-    parser.add_argument("--critic-lr", type=float, default=5e-3)
-    parser.add_argument("--discount-factor", type=float, default=0.9)
-    parser.add_argument("--num-episodes", type=float, default=2000)
+    parser.add_argument("--actor-lr", type=float, default=1e-4)
+    parser.add_argument("--critic-lr", type=float, default=5e-4)
+    parser.add_argument("--discount-factor", type=float, default=0.99)
+    parser.add_argument("--num-episodes", type=float, default=200)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=int, default=1e-2
+        "--entropy-weight", type=int, default=1e-3
     )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.8)
     parser.add_argument("--batch-size", type=int, default=64)

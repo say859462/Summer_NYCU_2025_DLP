@@ -241,13 +241,13 @@ class A2CAgent:
                     tqdm.write(f"Episode {ep}: Total Reward = {score}")
                     # W&B logging
                     wandb.log({"episode": ep, "return": score})
-            if ep % 100 == 0:
+            if (ep + 1) % 100 == 0:
                 torch.save(
                     {
                         "actor_state_dict": self.actor.state_dict(),
                         "critic_state_dict": self.critic.state_dict(),
                     },
-                    args.model_save_path + f"\\{ep}.pt",
+                    args.model_save_path + f"\\{ep+1}.pt",
                 )
 
             if score > best_score:
@@ -304,12 +304,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-run")
     parser.add_argument("--actor-lr", type=float, default=1e-4)
-    parser.add_argument("--critic-lr", type=float, default=1e-3)
-    parser.add_argument("--discount-factor", type=float, default=0.9)
-    parser.add_argument("--num-episodes", type=float, default=2000)
+    parser.add_argument("--critic-lr", type=float, default=5e-4)
+    parser.add_argument("--discount-factor", type=float, default=0.99)
+    parser.add_argument("--num-episodes", type=float, default=3000)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=float, default=1e-2
+        "--entropy-weight", type=float, default=1e-3
     )  # entropy can be disabled by setting this to 0
 
     parser.add_argument("--video-path", type=str, default="./A2C_Pendulum_Video")
