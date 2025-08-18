@@ -39,11 +39,12 @@ class Actor(nn.Module):
         ############TODO#############
         # Remeber to initialize the layer weights
         self.hidden1 = nn.Linear(in_dim, 128)
-        self.mu_layer = nn.Linear(128, out_dim)
-        self.log_std_layer = nn.Linear(128, out_dim)
+        self.hidden2 = nn.Linear(128, 64)
+        self.mu_layer = nn.Linear(64, out_dim)
+        self.log_std_layer = nn.Linear(64, out_dim)
 
-        initialize_uniformly(self.mu_layer)
-        initialize_uniformly(self.log_std_layer)
+        initialize_uniformly(self.mu_layer, init_w=1e-3)
+        initialize_uniformly(self.log_std_layer, init_w=1e-3)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -51,6 +52,7 @@ class Actor(nn.Module):
 
         ############TODO#############
         x = F.relu(self.hidden1(state))
+        x = F.relu(self.hidden2(x))
 
         mu = torch.tanh(self.mu_layer(x)) * 2
         log_std = F.softplus(self.log_std_layer(x))
@@ -74,14 +76,16 @@ class Critic(nn.Module):
         ############TODO#############
         # Remeber to initialize the layer weights
         self.hidden1 = nn.Linear(in_dim, 128)
-        self.out = nn.Linear(128, 1)
+        self.hidden2 = nn.Linear(128, 64)
+        self.out = nn.Linear(64, 1)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
 
         ############TODO#############
-        x = F.relu(self.hidden1(state))
+        x = torch.tanh(self.hidden1(state))
+        x = torch.tanh(self.hidden2(x))
         value = self.out(x)
         #############################
 
@@ -191,8 +195,11 @@ class A2CAgent:
         ############TODO#############
         # Actor Loss
         advantage = (targ_value - pred_value).detach()
-        policy_loss = -advantage * log_prob
-        policy_loss += self.entropy_weight * -log_prob  # entropy maximization
+        _, dist = self.actor(state)
+        entropy = dist.entropy().mean()
+        policy_loss = (
+            -log_prob * advantage - self.entropy_weight * entropy
+        )  # entropy maximization
 
         #############################
         # update policy
@@ -287,14 +294,14 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-run")
-    parser.add_argument("--actor-lr", type=float, default=1e-4)
-    parser.add_argument("--critic-lr", type=float, default=1e-3)
-    parser.add_argument("--discount-factor", type=float, default=0.9)
+    parser.add_argument("--actor-lr", type=float, default=2e-4)
+    parser.add_argument("--critic-lr", type=float, default=5e-4)
+    parser.add_argument("--discount-factor", type=float, default=0.99)
     parser.add_argument("--num-episodes", type=float, default=1000)
     parser.add_argument("--seed", type=int, default=777)
 
     parser.add_argument(
-        "--entropy-weight", type=float, default=1e-2
+        "--entropy-weight", type=float, default=0.01
     )  # entropy can be disabled by setting this to 0
 
     parser.add_argument("--video-path", type=str, default="./A2C_Pendulum_Video")

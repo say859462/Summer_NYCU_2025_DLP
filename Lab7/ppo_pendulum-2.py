@@ -39,7 +39,7 @@ class Actor(nn.Module):
         in_dim: int,
         out_dim: int,
         log_std_min: int = -20,
-        log_std_max: int = 0,
+        log_std_max: int = 2,
     ):
         """Initialize."""
         super(Actor, self).__init__()
@@ -48,12 +48,11 @@ class Actor(nn.Module):
         # Remeber to initialize the layer weights
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
-        self.hidden = nn.Linear(in_dim, 32)
-
-        self.mu_layer = nn.Linear(32, out_dim)
+        self.hidden1 = nn.Linear(in_dim, 64)
+        self.hidden2 = nn.Linear(64, 64)
+        self.mu_layer = nn.Linear(64, out_dim)
         self.mu_layer = init_layer_uniform(self.mu_layer)
-
-        self.log_std_layer = nn.Linear(32, out_dim)
+        self.log_std_layer = nn.Linear(64, out_dim)
         self.log_std_layer = init_layer_uniform(self.log_std_layer)
         #############################
 
@@ -61,17 +60,15 @@ class Actor(nn.Module):
         """Forward method implementation."""
 
         ############TODO#############
-        x = F.relu(self.hidden(state))
-
+        x = F.relu(self.hidden1(state))
+        x = F.relu(self.hidden2(x))
         mu = torch.tanh(self.mu_layer(x))
-        log_std = torch.tanh(self.log_std_layer(x))
-        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
-            log_std + 1
-        )
+        log_std = self.log_std_layer(x)
+        log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std)
-
         dist = Normal(mu, std)
         action = dist.sample()
+        return action, dist
 
         #############################
 
@@ -85,7 +82,8 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden = nn.Linear(in_dim, 64)
+        self.hidden1 = nn.Linear(in_dim, 64)
+        self.hidden2 = nn.Linear(64, 64)
         self.out = nn.Linear(64, 1)
         self.out = init_layer_uniform(self.out)
         #############################
@@ -94,8 +92,10 @@ class Critic(nn.Module):
         """Forward method implementation."""
 
         ############TODO#############
-        x = F.relu(self.hidden(state))
+        x = F.relu(self.hidden1(state))
+        x = F.relu(self.hidden2(x))
         value = self.out(x)
+        return value
         #############################
 
         return value
@@ -184,8 +184,8 @@ class PPOAgent:
         self.critic = Critic(self.obs_dim).to(self.device)
 
         # optimizer
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=0.001)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=0.005)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=args.actor_lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=args.critic_lr)
 
         # memory for training
         self.states: List[torch.Tensor] = []
@@ -218,7 +218,8 @@ class PPOAgent:
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, np.float64, bool]:
         """Take an action and return the response of the env."""
-        next_state, reward, terminated, truncated, _ = self.env.step(action)
+        action_scaled = action * self.env.action_space.high[0]
+        next_state, reward, terminated, truncated, _ = self.env.step(action_scaled)
         done = terminated or truncated
         next_state = np.reshape(next_state, (1, -1)).astype(np.float64)
         reward = np.reshape(reward, (1, -1)).astype(np.float64)
@@ -250,6 +251,8 @@ class PPOAgent:
         values = torch.cat(self.values).detach()
         log_probs = torch.cat(self.log_probs).detach()
         advantages = returns - values
+
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         actor_losses, critic_losses = [], []
 
@@ -285,17 +288,19 @@ class PPOAgent:
             # critic_loss
             ############TODO#############
             value = self.critic(state)
-            critic_loss = (return_ - value).pow(2).mean()
+            critic_loss = F.mse_loss(return_, value)
             #############################
 
             # train critic
             self.critic_optimizer.zero_grad()
             critic_loss.backward(retain_graph=True)
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
             self.critic_optimizer.step()
 
             # train actor
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
             self.actor_optimizer.step()
 
             actor_losses.append(actor_loss.item())
@@ -335,7 +340,7 @@ class PPOAgent:
                 # if episode ends
                 if done[0][0]:
                     episode_count += 1
-                    state, _ = self.env.reset(seed=self.seed)
+                    state, _ = self.env.reset(seed=self.seed + episode_count)
                     state = np.expand_dims(state, axis=0)
                     scores.append(score)
                     tqdm.write(f"Episode {episode_count}: Total Reward = {score}")
@@ -408,19 +413,19 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=0.001)
-    parser.add_argument("--critic-lr", type=float, default=0.005)
-    parser.add_argument("--discount-factor", type=float, default=0.9)
-    parser.add_argument("--num-episodes", type=float, default=200)
+    parser.add_argument("--actor-lr", type=float, default=3e-4)
+    parser.add_argument("--critic-lr", type=float, default=5e-4)
+    parser.add_argument("--discount-factor", type=float, default=0.99)
+    parser.add_argument("--num-episodes", type=float, default=100)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=float, default=0.005
+        "--entropy-weight", type=float, default=0.01
     )  # entropy can be disabled by setting this to 0
-    parser.add_argument("--tau", type=float, default=0.8)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--tau", type=float, default=0.95)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epsilon", type=float, default=0.2)
-    parser.add_argument("--rollout-len", type=int, default=2048)
-    parser.add_argument("--update-epoch", type=float, default=3)
+    parser.add_argument("--rollout-len", type=int, default=4096)
+    parser.add_argument("--update-epoch", type=float, default=10)
 
     parser.add_argument("--video-path", type=str, default="./PPO_Pendulum_Video")
     parser.add_argument("--model-path", type=str, default="./task2/best.pt")

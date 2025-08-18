@@ -341,19 +341,7 @@ class PPOAgent:
                     state = np.expand_dims(state, axis=0)
                     scores.append(score)
                     wandb.log({"episode": ep, "return": score}, step=self.total_step)
-                    avg_score = np.mean(score)
-                    if avg_score > best_avg_score:
-                        best_avg_score = avg_score
-                        tqdm.write(
-                            f"Step {self.total_step}: New best avg score = {avg_score:.2f}, Saving model..."
-                        )
-                        torch.save(
-                            {
-                                "actor_state_dict": self.actor.state_dict(),
-                                "critic_state_dict": self.critic.state_dict(),
-                            },
-                            args.model_save_path + f"\\best.pt",
-                        )
+
                     tqdm.write(f"Episode {episode_count}: Total Reward = {score}")
                     score = 0
             if (ep + 1) % 100 == 0:
@@ -422,7 +410,7 @@ if __name__ == "__main__":
     parser.add_argument("--actor-lr", type=float, default=3e-4)
     parser.add_argument("--critic-lr", type=float, default=1e-3)
     parser.add_argument("--discount-factor", type=float, default=0.99)
-    parser.add_argument("--num-episodes", type=float, default=2000)
+    parser.add_argument("--num-episodes", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
         "--entropy-weight", type=float, default=1e-3
@@ -431,7 +419,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--rollout-len", type=int, default=2048)
-    parser.add_argument("--update-epoch", type=float, default=10)
+    parser.add_argument("--update-epoch", type=int, default=10)
 
     parser.add_argument("--video-path", type=str, default="./PPO_Walker2d_Video")
     parser.add_argument("--model-path", type=str, default="./task3/best.pt")
@@ -445,17 +433,16 @@ if __name__ == "__main__":
 
     # environment
     env = gym.make("Walker2d-v4", render_mode="rgb_array")
-    seed = 77
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
     seed_torch(seed)
-    wandb.init(project="DLP-Lab7-PPO-Walker", name=args.wandb_run_name, save_code=True)
 
     agent = PPOAgent(env, args)
 
     if args.train:
 
-        args.wandb_run_name += f"_alr_{args.actor_lr}_clr_{args.critic_lr}_bs_{args.batch_size}_ep_{args.num_episodes}"
+        args.wandb_run_name += f"_alr_{args.actor_lr}_clr_{args.critic_lr}_df_{args.discount_factor}_ew_{args.entropy_weight}_tau_{args.tau}_rl_{args.rollout_len}_ep_{args.num_episodes}"
         wandb.init(
             project="DLP-Lab7-PPO-Walker2d", name=args.wandb_run_name, save_code=True
         )
