@@ -66,7 +66,7 @@ class Actor(nn.Module):
         x = torch.tanh(self.hidden1(state))
         x = torch.tanh(self.hidden2(x))
 
-        mu = self.mu_layer(x)  # [-1,1] : walker2d action space
+        mu = torch.tanh(self.mu_layer(x))  # [-1,1] : walker2d action space
 
         clamped_log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max)
         std = torch.exp(clamped_log_std)
@@ -283,7 +283,7 @@ class PPOAgent:
             # critic_loss
             ############TODO#############
             value = self.critic(state)
-            critic_loss = F.smooth_l1_loss(value, return_)
+            critic_loss = F.mse_loss(value, return_)
 
             #############################
 
@@ -363,7 +363,7 @@ class PPOAgent:
                         "actor_state_dict": self.actor.state_dict(),
                         "critic_state_dict": self.critic.state_dict(),
                     },
-                    args.model_save_path + f"\\{ep+1}.pt",
+                    args.model_save_path + f"\\{self.total_step}.pt",
                 )
             actor_loss, critic_loss = self.update_model(next_state)
             # W&B logging
@@ -419,13 +419,13 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="walker-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=1e-4)
-    parser.add_argument("--critic-lr", type=float, default=1e-4)
+    parser.add_argument("--actor-lr", type=float, default=3e-4)
+    parser.add_argument("--critic-lr", type=float, default=1e-3)
     parser.add_argument("--discount-factor", type=float, default=0.99)
     parser.add_argument("--num-episodes", type=float, default=2000)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=int, default=1e-2
+        "--entropy-weight", type=float, default=1e-3
     )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.95)
     parser.add_argument("--batch-size", type=int, default=64)

@@ -174,9 +174,7 @@ class PPOAgent:
         self.entropy_weight = args.entropy_weight
         self.seed = args.seed
         self.update_epoch = args.update_epoch
-        
-        
-        
+
         # device: cpu / gpu
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -417,11 +415,11 @@ if __name__ == "__main__":
     parser.add_argument("--num-episodes", type=float, default=200)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=int, default=1e-3
+        "--entropy-weight", type=float, default=1e-3
     )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.8)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--epsilon", type=int, default=0.2)
+    parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--rollout-len", type=int, default=2048)
     parser.add_argument("--update-epoch", type=float, default=64)
 
