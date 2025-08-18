@@ -38,12 +38,12 @@ class Actor(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden1 = nn.Linear(in_dim, 256)
-        self.hidden2 = nn.Linear(256, 256)
-        # Spec assume that the dist is always gaussian
-        self.mu_layer = nn.Linear(256, out_dim)
-        self.log_std = nn.Parameter(torch.full((out_dim,), -1.0))
-        initialize_uniformly(self.mu_layer, init_w=5e-4)
+        self.hidden1 = nn.Linear(in_dim, 128)
+        self.mu_layer = nn.Linear(128, out_dim)
+        self.log_std_layer = nn.Linear(128, out_dim)
+
+        initialize_uniformly(self.mu_layer)
+        initialize_uniformly(self.log_std_layer)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -51,14 +51,15 @@ class Actor(nn.Module):
 
         ############TODO#############
         x = F.relu(self.hidden1(state))
-        x = F.relu(self.hidden2(x))
 
-        mu = torch.tanh(self.mu_layer(x)) * 2  # Action space of pendulum is [-2,2]
-
-        std = torch.exp(self.log_std)
+        mu = torch.tanh(self.mu_layer(x)) * 2
+        log_std = F.softplus(self.log_std_layer(x))
+        std = torch.exp(log_std)
 
         dist = Normal(mu, std)
         action = dist.sample()
+
+        return action, dist
         #############################
 
         # Actor receive a state then compute the action distribution of that state
@@ -72,11 +73,8 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden1 = nn.Linear(in_dim, 256)
-        self.hidden2 = nn.Linear(256, 256)
-        self.out = nn.Linear(256, 1)
-
-        initialize_uniformly(self.out, init_w=5e-4)
+        self.hidden1 = nn.Linear(in_dim, 128)
+        self.out = nn.Linear(128, 1)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -84,7 +82,6 @@ class Critic(nn.Module):
 
         ############TODO#############
         x = F.relu(self.hidden1(state))
-        x = F.relu(self.hidden2(x))
         value = self.out(x)
         #############################
 
@@ -180,32 +177,27 @@ class A2CAgent:
 
         # Critic Loss
         pred_value = self.critic(state)
-        target_value = reward + self.gamma * self.critic(next_state) * mask
-        value_loss = F.mse_loss(pred_value, target_value.detach())
+        targ_value = reward + self.gamma * self.critic(next_state) * mask
+        value_loss = F.smooth_l1_loss(pred_value, targ_value.detach())
 
         #############################
 
         # update value
         self.critic_optimizer.zero_grad()
         value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
-
         self.critic_optimizer.step()
 
         # advantage = Q_t - V(s_t)
         ############TODO#############
         # Actor Loss
-        _, dist = self.actor(state)
-        entropy = dist.entropy().sum()
-        advantage = (target_value - pred_value).detach()
-
-        policy_loss = -(advantage * log_prob + self.entropy_weight * entropy)
+        advantage = (targ_value - pred_value).detach()
+        policy_loss = -advantage * log_prob
+        policy_loss += self.entropy_weight * -log_prob  # entropy maximization
 
         #############################
         # update policy
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
         self.actor_optimizer.step()
 
         return policy_loss.item(), value_loss.item()
@@ -295,14 +287,14 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-run")
-    parser.add_argument("--actor-lr", type=float, default=3e-4)
-    parser.add_argument("--critic-lr", type=float, default=3e-4)
-    parser.add_argument("--discount-factor", type=float, default=0.995)
+    parser.add_argument("--actor-lr", type=float, default=1e-4)
+    parser.add_argument("--critic-lr", type=float, default=1e-3)
+    parser.add_argument("--discount-factor", type=float, default=0.9)
     parser.add_argument("--num-episodes", type=float, default=1000)
     parser.add_argument("--seed", type=int, default=777)
 
     parser.add_argument(
-        "--entropy-weight", type=float, default=0.005
+        "--entropy-weight", type=float, default=1e-2
     )  # entropy can be disabled by setting this to 0
 
     parser.add_argument("--video-path", type=str, default="./A2C_Pendulum_Video")

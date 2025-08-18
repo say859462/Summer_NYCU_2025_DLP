@@ -48,12 +48,12 @@ class Actor(nn.Module):
         # Remeber to initialize the layer weights
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
-        self.hidden = nn.Linear(in_dim, 128)
+        self.hidden = nn.Linear(in_dim, 32)
 
-        self.mu_layer = nn.Linear(128, out_dim)
+        self.mu_layer = nn.Linear(32, out_dim)
         self.mu_layer = init_layer_uniform(self.mu_layer)
 
-        self.log_std_layer = nn.Linear(128, out_dim)
+        self.log_std_layer = nn.Linear(32, out_dim)
         self.log_std_layer = init_layer_uniform(self.log_std_layer)
         #############################
 
@@ -63,11 +63,11 @@ class Actor(nn.Module):
         ############TODO#############
         x = F.relu(self.hidden(state))
 
-        mu = torch.tanh(self.mu_layer(x)) * 2
-        log_std = torch.tanh(self.log_std_layer(x))  # [-1,1]
+        mu = torch.tanh(self.mu_layer(x))
+        log_std = torch.tanh(self.log_std_layer(x))
         log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
             log_std + 1
-        )  # [0,2] => [0,-40] => [0,-20] => [0,-20]
+        )
         std = torch.exp(log_std)
 
         dist = Normal(mu, std)
@@ -85,8 +85,8 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden = nn.Linear(in_dim, 128)
-        self.out = nn.Linear(128, 1)
+        self.hidden = nn.Linear(in_dim, 64)
+        self.out = nn.Linear(64, 1)
         self.out = init_layer_uniform(self.out)
         #############################
 
@@ -112,7 +112,6 @@ def compute_gae(
     returns = []
 
     for step in reversed(range(len(rewards))):
-        # TD error
         delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]
         gae = delta + gamma * tau * masks[step] * gae
         returns.insert(0, gae + values[step])
@@ -409,19 +408,19 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=1e-4)
-    parser.add_argument("--critic-lr", type=float, default=5e-4)
-    parser.add_argument("--discount-factor", type=float, default=0.99)
+    parser.add_argument("--actor-lr", type=float, default=0.001)
+    parser.add_argument("--critic-lr", type=float, default=0.005)
+    parser.add_argument("--discount-factor", type=float, default=0.9)
     parser.add_argument("--num-episodes", type=float, default=200)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=float, default=1e-3
+        "--entropy-weight", type=float, default=0.005
     )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.8)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--rollout-len", type=int, default=2048)
-    parser.add_argument("--update-epoch", type=float, default=64)
+    parser.add_argument("--update-epoch", type=float, default=3)
 
     parser.add_argument("--video-path", type=str, default="./PPO_Pendulum_Video")
     parser.add_argument("--model-path", type=str, default="./task2/best.pt")
@@ -443,6 +442,8 @@ if __name__ == "__main__":
     agent = PPOAgent(env, args)
 
     if args.train:
+        args.wandb_run_name += f"_alr_{args.actor_lr}_clr_{args.critic_lr}_df_{args.discount_factor}_ew_{args.entropy_weight}_tau_{args.tau}_rl_{args.rollout_len}_ep_{args.num_episodes}"
+
         wandb.init(
             project="DLP-Lab7-PPO-Pendulum", name=args.wandb_run_name, save_code=True
         )
