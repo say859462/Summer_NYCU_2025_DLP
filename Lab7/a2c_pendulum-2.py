@@ -39,12 +39,12 @@ class Actor(nn.Module):
         ############TODO#############
         # Remeber to initialize the layer weights
         self.hidden1 = nn.Linear(in_dim, 128)
-        self.hidden2 = nn.Linear(128, 64)
-        self.mu_layer = nn.Linear(64, out_dim)
-        self.log_std_layer = nn.Linear(64, out_dim)
+        self.hidden2 = nn.Linear(128, 128)
+        self.mu_layer = nn.Linear(128, out_dim)
+        self.log_std_layer = nn.Linear(128, out_dim)
 
-        initialize_uniformly(self.mu_layer, init_w=1e-3)
-        initialize_uniformly(self.log_std_layer, init_w=1e-3)
+        initialize_uniformly(self.mu_layer)
+        initialize_uniformly(self.log_std_layer)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -54,14 +54,13 @@ class Actor(nn.Module):
         x = F.relu(self.hidden1(state))
         x = F.relu(self.hidden2(x))
 
-        mu = torch.tanh(self.mu_layer(x)) * 2
+        mu = torch.tanh(self.mu_layer(x)) * 2  # Action space [-2,2]
         log_std = F.softplus(self.log_std_layer(x))
         std = torch.exp(log_std)
 
         dist = Normal(mu, std)
         action = dist.sample()
 
-        return action, dist
         #############################
 
         # Actor receive a state then compute the action distribution of that state
@@ -76,16 +75,18 @@ class Critic(nn.Module):
         ############TODO#############
         # Remeber to initialize the layer weights
         self.hidden1 = nn.Linear(in_dim, 128)
-        self.hidden2 = nn.Linear(128, 64)
-        self.out = nn.Linear(64, 1)
+        self.hidden2 = nn.Linear(128, 128)
+        self.out = nn.Linear(128, 1)
+
+        initialize_uniformly(self.out)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
 
         ############TODO#############
-        x = torch.tanh(self.hidden1(state))
-        x = torch.tanh(self.hidden2(x))
+        x = F.relu(self.hidden1(state))
+        x = F.relu(self.hidden2(x))
         value = self.out(x)
         #############################
 
@@ -133,6 +134,18 @@ class A2CAgent:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.actor_lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.critic_lr)
 
+        self.actor_scheduler = optim.lr_scheduler.LinearLR(
+            self.actor_optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=self.num_episodes,
+        )
+        self.critic_scheduler = optim.lr_scheduler.LinearLR(
+            self.critic_optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=self.num_episodes,
+        )
         # transition (state, log_prob, next_state, reward, done)
         self.transition: list = list()
 
@@ -182,19 +195,21 @@ class A2CAgent:
         # Critic Loss
         pred_value = self.critic(state)
         targ_value = reward + self.gamma * self.critic(next_state) * mask
-        value_loss = F.smooth_l1_loss(pred_value, targ_value.detach())
+        value_loss = F.mse_loss(pred_value, targ_value.detach())
 
         #############################
 
         # update value
         self.critic_optimizer.zero_grad()
         value_loss.backward()
+        # torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.critic_optimizer.step()
 
         # advantage = Q_t - V(s_t)
         ############TODO#############
-        # Actor Loss
         advantage = (targ_value - pred_value).detach()
+        # advantage = torch.clamp(advantage, -1.0, 1.0)
+
         _, dist = self.actor(state)
         entropy = dist.entropy().mean()
         policy_loss = (
@@ -205,6 +220,7 @@ class A2CAgent:
         # update policy
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
+        # torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
 
         return policy_loss.item(), value_loss.item()
@@ -232,6 +248,7 @@ class A2CAgent:
                 score += reward
                 step_count += 1
                 # W&B logging
+
                 wandb.log(
                     {
                         "step": step_count,
@@ -244,14 +261,19 @@ class A2CAgent:
                     scores.append(score)
                     tqdm.write(f"Episode {ep}: Total Reward = {score}")
                     # W&B logging
+
                     wandb.log({"episode": ep, "return": score})
+                    
+            self.actor_scheduler.step()
+            self.critic_scheduler.step()
+            
             if (ep + 1) % 100 == 0:
                 torch.save(
                     {
                         "actor_state_dict": self.actor.state_dict(),
                         "critic_state_dict": self.critic.state_dict(),
                     },
-                    args.model_save_path + f"\\{step_count}.pt",
+                    os.path.join(args.model_save_path, f"{step_count}.pt"),
                 )
 
     def test(self, video_folder: str):
@@ -293,16 +315,13 @@ def seed_torch(seed):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-run")
-    parser.add_argument("--actor-lr", type=float, default=2e-4)
+    parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-final-run")
+    parser.add_argument("--actor-lr", type=float, default=3e-4)
     parser.add_argument("--critic-lr", type=float, default=5e-4)
     parser.add_argument("--discount-factor", type=float, default=0.99)
-    parser.add_argument("--num-episodes", type=float, default=1000)
+    parser.add_argument("--num-episodes", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=777)
-
-    parser.add_argument(
-        "--entropy-weight", type=float, default=0.01
-    )  # entropy can be disabled by setting this to 0
+    parser.add_argument("--entropy-weight", type=float, default=0.01)
 
     parser.add_argument("--video-path", type=str, default="./A2C_Pendulum_Video")
     parser.add_argument("--model-path", type=str, default="./task1/best.pt")
@@ -312,6 +331,11 @@ if __name__ == "__main__":
         "--test", action="store_true", help="Test the pre-trained model"
     )
     parser.add_argument("--test-episode", type=int, default=30)
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="Flag to enable Weights & Biases logging",
+    )
     args = parser.parse_args()
 
     env = gym.make("Pendulum-v1", render_mode="rgb_array")
@@ -326,11 +350,15 @@ if __name__ == "__main__":
 
         args.wandb_run_name += f"_alr_{args.actor_lr}_clr_{args.critic_lr}_df_{args.discount_factor}_ew_{args.entropy_weight}_ep_{args.num_episodes}"
         wandb.init(
-            project="DLP-Lab7-A2C-Pendulum", name=args.wandb_run_name, save_code=True
+            project="DLP-Lab7-A2C-Pendulum",
+            name=args.wandb_run_name,
+            save_code=True,
         )
 
         agent.train()
+
         wandb.finish()
+
     elif args.test:
         checkpoint = torch.load(args.model_path, map_location=agent.device)
         agent.actor.load_state_dict(checkpoint["actor_state_dict"])

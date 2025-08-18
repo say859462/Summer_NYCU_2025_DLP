@@ -187,8 +187,8 @@ class PPOAgent:
         self.critic = Critic(self.obs_dim).to(self.device)
 
         # optimizer
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=0.001)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=0.005)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=args.actor_lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=args.critic_lr)
 
         # memory for training
         self.states: List[torch.Tensor] = []
@@ -253,6 +253,7 @@ class PPOAgent:
         values = torch.cat(self.values).detach()
         log_probs = torch.cat(self.log_probs).detach()
         advantages = returns - values
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         actor_losses, critic_losses = [], []
 
@@ -320,7 +321,6 @@ class PPOAgent:
         scores = []
         score = 0
         episode_count = 0
-        best_avg_score = -np.inf
         for ep in tqdm(range(1, self.num_episodes), desc="Training Steps"):
             score = 0
             print("\n")
@@ -344,7 +344,7 @@ class PPOAgent:
 
                     tqdm.write(f"Episode {episode_count}: Total Reward = {score}")
                     score = 0
-            if (ep + 1) % 100 == 0:
+            if (ep + 1) % 10 == 0:
 
                 torch.save(
                     {
@@ -382,6 +382,9 @@ class PPOAgent:
             score = 0
             while not done:
                 action = self.select_action(state)
+                action = action.reshape(
+                    self.action_dim,
+                )
                 next_state, reward, done = self.step(action)
 
                 state = next_state
@@ -408,7 +411,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="walker-ppo-run")
     parser.add_argument("--actor-lr", type=float, default=3e-4)
-    parser.add_argument("--critic-lr", type=float, default=1e-3)
+    parser.add_argument("--critic-lr", type=float, default=3e-4)
     parser.add_argument("--discount-factor", type=float, default=0.99)
     parser.add_argument("--num-episodes", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=77)
