@@ -38,10 +38,9 @@ class Actor(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden1 = nn.Linear(in_dim, 128)
-        self.hidden2 = nn.Linear(128, 128)
-        self.mu_layer = nn.Linear(128, out_dim)
-        self.log_std_layer = nn.Linear(128, out_dim)
+        self.hidden1 = nn.Linear(in_dim, 256)
+        self.mu_layer = nn.Linear(256, out_dim)
+        self.log_std_layer = nn.Linear(256, out_dim)
 
         initialize_uniformly(self.mu_layer)
         initialize_uniformly(self.log_std_layer)
@@ -52,7 +51,6 @@ class Actor(nn.Module):
 
         ############TODO#############
         x = F.relu(self.hidden1(state))
-        x = F.relu(self.hidden2(x))
 
         mu = torch.tanh(self.mu_layer(x)) * 2  # Action space [-2,2]
         log_std = F.softplus(self.log_std_layer(x))
@@ -74,9 +72,8 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden1 = nn.Linear(in_dim, 128)
-        self.hidden2 = nn.Linear(128, 128)
-        self.out = nn.Linear(128, 1)
+        self.hidden1 = nn.Linear(in_dim, 256)
+        self.out = nn.Linear(256, 1)
 
         initialize_uniformly(self.out)
         #############################
@@ -86,7 +83,6 @@ class Critic(nn.Module):
 
         ############TODO#############
         x = F.relu(self.hidden1(state))
-        x = F.relu(self.hidden2(x))
         value = self.out(x)
         #############################
 
@@ -146,6 +142,7 @@ class A2CAgent:
             end_factor=0.1,
             total_iters=self.num_episodes,
         )
+
         # transition (state, log_prob, next_state, reward, done)
         self.transition: list = list()
 
@@ -195,7 +192,7 @@ class A2CAgent:
         # Critic Loss
         pred_value = self.critic(state)
         targ_value = reward + self.gamma * self.critic(next_state) * mask
-        value_loss = F.mse_loss(pred_value, targ_value.detach())
+        value_loss = F.smooth_l1_loss(pred_value, targ_value.detach())
 
         #############################
 
@@ -232,7 +229,8 @@ class A2CAgent:
         step_count = 0
         for ep in tqdm(range(1, self.num_episodes), desc="Training Episode"):
             actor_losses, critic_losses, scores = [], [], []
-            state, _ = self.env.reset(seed=self.seed)
+            # Modify here for model robustic
+            state, _ = self.env.reset(seed=self.seed + ep)
             score = 0
             done = False
             while not done:
@@ -263,10 +261,10 @@ class A2CAgent:
                     # W&B logging
 
                     wandb.log({"episode": ep, "return": score})
-                    
+
             self.actor_scheduler.step()
             self.critic_scheduler.step()
-            
+
             if (ep + 1) % 100 == 0:
                 torch.save(
                     {
@@ -318,8 +316,8 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-run-name", type=str, default="pendulum-a2c-final-run")
     parser.add_argument("--actor-lr", type=float, default=3e-4)
     parser.add_argument("--critic-lr", type=float, default=5e-4)
-    parser.add_argument("--discount-factor", type=float, default=0.99)
-    parser.add_argument("--num-episodes", type=int, default=2000)
+    parser.add_argument("--discount-factor", type=float, default=0.9)
+    parser.add_argument("--num-episodes", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=777)
     parser.add_argument("--entropy-weight", type=float, default=0.01)
 
@@ -330,7 +328,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test", action="store_true", help="Test the pre-trained model"
     )
-    parser.add_argument("--test-episode", type=int, default=30)
+    parser.add_argument("--test-episode", type=int, default=20)
     parser.add_argument(
         "--use-wandb",
         action="store_true",

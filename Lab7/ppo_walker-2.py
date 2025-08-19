@@ -24,7 +24,7 @@ from tqdm import tqdm
 import os
 
 
-# Reference :https://github.com/asdfGuest/Simple-PPO
+# Reference :https://github.com/pat-coady/trpo/tree/aigym_evaluation
 def init_layer_uniform(layer: nn.Linear, init_w: float = 3e-3) -> nn.Linear:
     """Init uniform parameters on the single layer."""
     layer.weight.data.uniform_(-init_w, init_w)
@@ -49,11 +49,14 @@ class Actor(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
-        self.hidden1 = nn.Linear(in_dim, 256)
-        self.hidden2 = nn.Linear(256, 256)
+        hid1_size = in_dim * 10
+        hid3_size = out_dim * 10
+        hid2_size = int(np.sqrt(hid1_size * hid3_size))
 
-        self.mu_layer = nn.Linear(256, out_dim)
-        self.mu_layer = init_layer_uniform(self.mu_layer)
+        self.hidden1 = nn.Linear(in_dim, hid1_size)
+        self.hidden2 = nn.Linear(hid1_size, hid2_size)
+        self.hidden3 = nn.Linear(hid2_size, hid3_size)
+        self.mu_layer = nn.Linear(hid3_size, out_dim)
 
         self.log_std = nn.Parameter(torch.zeros(out_dim))
 
@@ -65,8 +68,8 @@ class Actor(nn.Module):
         ############TODO#############
         x = torch.tanh(self.hidden1(state))
         x = torch.tanh(self.hidden2(x))
-
-        mu = torch.tanh(self.mu_layer(x))  # [-1,1] : walker2d action space
+        x = torch.tanh(self.hidden3(x))
+        mu = self.mu_layer(x)  # [-1,1] : walker2d action space
 
         clamped_log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max)
         std = torch.exp(clamped_log_std)
@@ -85,10 +88,14 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        self.hidden1 = nn.Linear(in_dim, 256)
-        self.hidden2 = nn.Linear(256, 256)
-        self.out = nn.Linear(256, 1)
-        self.out = init_layer_uniform(self.out)
+        hid1_size = in_dim * 10
+        hid3_size = 1 * 10 # 輸出維度為 1
+        hid2_size = int(np.sqrt(hid1_size * hid3_size))
+
+        self.hidden1 = nn.Linear(in_dim, hid1_size)
+        self.hidden2 = nn.Linear(hid1_size, hid2_size)
+        self.hidden3 = nn.Linear(hid2_size, hid3_size)
+        self.out = nn.Linear(hid3_size, 1)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -97,6 +104,7 @@ class Critic(nn.Module):
         ############TODO#############
         x = torch.tanh(self.hidden1(state))
         x = torch.tanh(self.hidden2(x))
+        x = torch.tanh(self.hidden3(x))
         value = self.out(x)
         #############################
 
@@ -284,18 +292,25 @@ class PPOAgent:
             # critic_loss
             ############TODO#############
             value = self.critic(state)
-            critic_loss = F.mse_loss(value, return_)
+            value_clipped = old_value + torch.clamp(
+                value - old_value, -self.epsilon, self.epsilon
+            )
+            loss_unclipped = F.mse_loss(value, return_)
+            loss_clipped = F.mse_loss(value_clipped, return_)
+            critic_loss = torch.max(loss_unclipped, loss_clipped)
 
             #############################
 
             # train critic
             self.critic_optimizer.zero_grad()
             critic_loss.backward(retain_graph=True)
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
             self.critic_optimizer.step()
 
             # train actor
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
             self.actor_optimizer.step()
 
             actor_losses.append(actor_loss.item())
@@ -389,11 +404,10 @@ class PPOAgent:
 
                 state = next_state
                 score += reward
-            total_score += score
-            tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score} ")
+            total_score += score.item()
+            tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score.item()} ")
 
-        total_score += score.item()
-        tqdm.write(f"Ep: {i+1}, Seed {self.seed+i}, score:{score.item()} ")
+        tqdm.write(f"Avg score:{total_score/args.test_episode :.2f} ")
 
         self.env.close()
 
@@ -410,19 +424,20 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="walker-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=3e-4)
-    parser.add_argument("--critic-lr", type=float, default=3e-4)
-    parser.add_argument("--discount-factor", type=float, default=0.99)
+    parser.add_argument("--actor-lr", type=float, default=2e-4)
+    parser.add_argument("--critic-lr", type=float, default=1e-3)
+    parser.add_argument("--discount-factor", type=float, default=0.995)
     parser.add_argument("--num-episodes", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=float, default=1e-3
+        "--entropy-weight", type=float, default=1e-2
     )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.95)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--epsilon", type=float, default=0.2)
-    parser.add_argument("--rollout-len", type=int, default=2048)
-    parser.add_argument("--update-epoch", type=int, default=10)
+    # the number of update to the same data batch
+    parser.add_argument("--rollout-len", type=int, default=20000)
+    parser.add_argument("--update-epoch", type=int, default=20)
 
     parser.add_argument("--video-path", type=str, default="./PPO_Walker2d_Video")
     parser.add_argument("--model-path", type=str, default="./task3/best.pt")
