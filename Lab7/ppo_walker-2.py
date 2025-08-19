@@ -22,7 +22,8 @@ import argparse
 import wandb
 from tqdm import tqdm
 import os
-
+import warnings
+warnings.filterwarnings("ignore")
 
 # Reference :https://github.com/pat-coady/trpo/tree/aigym_evaluation
 def init_layer_uniform(layer: nn.Linear, init_w: float = 3e-3) -> nn.Linear:
@@ -33,13 +34,20 @@ def init_layer_uniform(layer: nn.Linear, init_w: float = 3e-3) -> nn.Linear:
     return layer
 
 
+def init_weights_orthogonal(layer: nn.Module, gain: float = np.sqrt(2)):
+    if isinstance(layer, nn.Linear):
+        nn.init.orthogonal_(layer.weight, gain=gain)
+        if layer.bias is not None:
+            nn.init.constant_(layer.bias, 0)
+
+
 class Actor(nn.Module):
     def __init__(
         self,
         in_dim: int,
         out_dim: int,
-        log_std_min: int = -20,
-        log_std_max: int = 2,
+        log_std_min: float = -5.0,
+        log_std_max: float = 2.0,
     ):
         """Initialize."""
         super(Actor, self).__init__()
@@ -49,16 +57,18 @@ class Actor(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
-        hid1_size = in_dim * 10
-        hid3_size = out_dim * 10
-        hid2_size = int(np.sqrt(hid1_size * hid3_size))
+        self.network = nn.Sequential(
+            nn.Linear(in_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 256),
+            nn.Tanh(),
+        )
 
-        self.hidden1 = nn.Linear(in_dim, hid1_size)
-        self.hidden2 = nn.Linear(hid1_size, hid2_size)
-        self.hidden3 = nn.Linear(hid2_size, hid3_size)
-        self.mu_layer = nn.Linear(hid3_size, out_dim)
+        self.mu_layer = nn.Linear(256, out_dim)
+        self.actor_logstd = nn.Parameter(torch.zeros(1, out_dim))
+        self.apply(init_weights_orthogonal)
 
-        self.log_std = nn.Parameter(torch.zeros(out_dim))
+        init_weights_orthogonal(self.mu_layer, gain=0.01)
 
         #############################
 
@@ -66,14 +76,12 @@ class Actor(nn.Module):
         """Forward method implementation."""
 
         ############TODO#############
-        x = torch.tanh(self.hidden1(state))
-        x = torch.tanh(self.hidden2(x))
-        x = torch.tanh(self.hidden3(x))
-        mu = self.mu_layer(x)  # [-1,1] : walker2d action space
-
-        clamped_log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max)
-        std = torch.exp(clamped_log_std)
-
+        x = self.network(state)
+        mu = self.mu_layer(x)
+        log_std = self.actor_logstd.expand_as(mu).clamp(
+            self.log_std_min, self.log_std_max
+        )
+        std = torch.exp(log_std)
         dist = Normal(mu, std)
         action = dist.sample()
         #############################
@@ -88,24 +96,23 @@ class Critic(nn.Module):
 
         ############TODO#############
         # Remeber to initialize the layer weights
-        hid1_size = in_dim * 10
-        hid3_size = 1 * 10 # 輸出維度為 1
-        hid2_size = int(np.sqrt(hid1_size * hid3_size))
+        self.network = nn.Sequential(
+            nn.Linear(in_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 256),
+            nn.Tanh(),
+            nn.Linear(256, 1),
+        )
 
-        self.hidden1 = nn.Linear(in_dim, hid1_size)
-        self.hidden2 = nn.Linear(hid1_size, hid2_size)
-        self.hidden3 = nn.Linear(hid2_size, hid3_size)
-        self.out = nn.Linear(hid3_size, 1)
+        self.apply(init_weights_orthogonal)
+        init_weights_orthogonal(self.network[-1], gain=1.0)
         #############################
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         """Forward method implementation."""
 
         ############TODO#############
-        x = torch.tanh(self.hidden1(state))
-        x = torch.tanh(self.hidden2(x))
-        x = torch.tanh(self.hidden3(x))
-        value = self.out(x)
+        value = self.network(state)
         #############################
 
         return value
@@ -186,7 +193,7 @@ class PPOAgent:
 
         # device: cpu / gpu
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(self.device)
+        # print(self.device)
 
         # networks
         self.obs_dim = env.observation_space.shape[0]
@@ -295,22 +302,21 @@ class PPOAgent:
             value_clipped = old_value + torch.clamp(
                 value - old_value, -self.epsilon, self.epsilon
             )
-            loss_unclipped = F.mse_loss(value, return_)
-            loss_clipped = F.mse_loss(value_clipped, return_)
-            critic_loss = torch.max(loss_unclipped, loss_clipped)
-
+            loss_v1 = F.mse_loss(value, return_)
+            loss_v2 = F.mse_loss(value_clipped, return_)
+            critic_loss = 0.5 * torch.max(loss_v1, loss_v2)
             #############################
 
             # train critic
             self.critic_optimizer.zero_grad()
             critic_loss.backward(retain_graph=True)
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
             self.critic_optimizer.step()
 
             # train actor
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
             self.actor_optimizer.step()
 
             actor_losses.append(actor_loss.item())
@@ -336,7 +342,20 @@ class PPOAgent:
         scores = []
         score = 0
         episode_count = 0
+        total_timesteps = self.num_episodes * self.rollout_len
+
         for ep in tqdm(range(1, self.num_episodes), desc="Training Steps"):
+            frac = 1.0 - (self.total_step / total_timesteps)
+
+            # update optimizer lr
+            new_lr = args.actor_lr * frac
+            for param_group in self.actor_optimizer.param_groups:
+                param_group["lr"] = new_lr
+
+            new_lr = args.critic_lr * frac
+            for param_group in self.critic_optimizer.param_groups:
+                param_group["lr"] = new_lr
+
             score = 0
             print("\n")
             for _ in range(self.rollout_len):
@@ -393,6 +412,8 @@ class PPOAgent:
         total_score = 0.0
         for i in range(args.test_episode):
             state, _ = self.env.reset(seed=self.seed + i)
+            state = np.expand_dims(state, axis=0)
+
             done = False
             score = 0
             while not done:
@@ -424,20 +445,20 @@ def seed_torch(seed):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb-run-name", type=str, default="walker-ppo-run")
-    parser.add_argument("--actor-lr", type=float, default=2e-4)
-    parser.add_argument("--critic-lr", type=float, default=1e-3)
-    parser.add_argument("--discount-factor", type=float, default=0.995)
-    parser.add_argument("--num-episodes", type=int, default=2000)
+    parser.add_argument("--actor-lr", type=float, default=2.5e-4)
+    parser.add_argument("--critic-lr", type=float, default=2.5e-4)
+    parser.add_argument("--discount-factor", type=float, default=0.99)
+    parser.add_argument("--num-episodes", type=int, default=1500)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
-        "--entropy-weight", type=float, default=1e-2
+        "--entropy-weight", type=float, default=0.001
     )  # entropy can be disabled by setting this to 0
     parser.add_argument("--tau", type=float, default=0.95)
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epsilon", type=float, default=0.2)
     # the number of update to the same data batch
-    parser.add_argument("--rollout-len", type=int, default=20000)
-    parser.add_argument("--update-epoch", type=int, default=20)
+    parser.add_argument("--rollout-len", type=int, default=2048)
+    parser.add_argument("--update-epoch", type=int, default=10)
 
     parser.add_argument("--video-path", type=str, default="./PPO_Walker2d_Video")
     parser.add_argument("--model-path", type=str, default="./task3/best.pt")

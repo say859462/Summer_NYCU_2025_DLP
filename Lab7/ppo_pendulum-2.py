@@ -25,6 +25,9 @@ import os
 
 
 # Reference :https://github.com/MrSyee/pg-is-all-you-need/tree/master
+import warnings
+warnings.filterwarnings("ignore")
+
 def init_layer_uniform(layer: nn.Linear, init_w: float = 3e-3) -> nn.Linear:
     """Init uniform parameters on the single layer."""
     layer.weight.data.uniform_(-init_w, init_w)

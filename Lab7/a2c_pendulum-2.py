@@ -20,7 +20,8 @@ import wandb
 from tqdm import tqdm
 from typing import Tuple
 import os
-
+import warnings
+warnings.filterwarnings("ignore")
 
 def initialize_uniformly(layer: nn.Linear, init_w: float = 3e-3):
     """Initialize the weights and bias in [-init_w, init_w]."""
@@ -211,7 +212,7 @@ class A2CAgent:
         entropy = dist.entropy().mean()
         policy_loss = (
             -log_prob * advantage - self.entropy_weight * entropy
-        )  # entropy maximization
+        ) 
 
         #############################
         # update policy
