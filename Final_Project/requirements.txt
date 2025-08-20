@@ -1,0 +1,17 @@
+
+# Main deep learning framework
+torch
+
+# Numerical computation library (pinned for compatibility)
+"numpy<2"
+
+# For C++ extension compilation and distance field calculation
+scipy
+
+# Computer Vision library (pinned for compatibility with numpy 1.23.5)
+opencv-python==4.8.1.78
+# Fast JSON processing
+ujson
+# Image processing
+Pillow
+

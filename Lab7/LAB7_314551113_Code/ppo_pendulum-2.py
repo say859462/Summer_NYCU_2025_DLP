@@ -419,7 +419,7 @@ if __name__ == "__main__":
     parser.add_argument("--actor-lr", type=float, default=3e-4)
     parser.add_argument("--critic-lr", type=float, default=5e-4)
     parser.add_argument("--discount-factor", type=float, default=0.99)
-    parser.add_argument("--num-episodes", type=float, default=100)
+    parser.add_argument("--num-episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=77)
     parser.add_argument(
         "--entropy-weight", type=float, default=0.01
@@ -428,7 +428,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--rollout-len", type=int, default=4096)
-    parser.add_argument("--update-epoch", type=float, default=10)
+    parser.add_argument("--update-epoch", type=int, default=10)
 
     parser.add_argument("--video-path", type=str, default="./PPO_Pendulum_Video")
     parser.add_argument("--model-path", type=str, default="./task2/best.pt")

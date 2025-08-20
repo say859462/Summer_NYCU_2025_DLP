@@ -31,7 +31,7 @@ Lab4/Tester.py
 Lab5/test_model.py
 Lab5/eval_videos/
 
-/Final Project/
+
 Lab6/iclevr/
 Lab5/LAB5_314551113.mp4
 Lab5/LAB5_314551113_劉哲良.zip
@@ -42,3 +42,9 @@ Lab6/acgan_result/ACGAN_inference_images/*.png
 *.zip
 *.png
 Lab7/Lab7.docx
+
+Final_Project/SPG
+Final_Project/CS
+Final_Project/data
+Final_Project/result
+Final_Project/Stroke-based Sequential-Spatial Neu.txt
